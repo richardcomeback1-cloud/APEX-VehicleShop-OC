@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VAL Vehicle Shop</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <script src="https://code.iconify.design/iconify-icon/3.0.0/iconify-icon.min.js"></script>
+</head>
+
+<body>
+    <!-- Bottom Panel - Full Width Vehicle Selection -->
+    <div class="bottom-panel" id="bottom-panel">
+        <!-- Categories -->
+        <div class="categories-bar">
+            <div class="categories-scroll" id="category-list">
+                <!-- Categories will be dynamically added -->
+            </div>
+        </div>
+
+        <!-- Vehicle Grid -->
+        <div class="vehicle-grid-container">
+            <button class="scroll-btn scroll-left" onclick="scrollVehicles('left')">
+                <iconify-icon icon="solar:alt-arrow-left-bold"></iconify-icon>
+            </button>
+            <div class="vehicle-grid" id="vehicle-list">
+                <!-- Vehicles will be dynamically added -->
+            </div>
+            <button class="scroll-btn scroll-right" onclick="scrollVehicles('right')">
+                <iconify-icon icon="solar:alt-arrow-right-bold"></iconify-icon>
+            </button>
+        </div>
+    </div>
+
+    <!-- Right Panel - Vehicle Details -->
+    <div class="right-panel" id="vehicle-info-panel">
+        <div class="info-card">
+            <!-- Vehicle Header -->
+            <div class="info-header">
+                <div class="vehicle-class-badge" id="vehicle-class">เลือก</div>
+                <h2 class="vehicle-name" id="vehicle-name">เลือกยานพาหนะที่ต้องการ</h2>
+            </div>
+
+            <!-- Price Section -->
+            <div class="price-section">
+                <div class="price-label">ราคาที่ขาย</div>
+                <div class="price-value" id="vehicle-price">$0</div>
+            </div>
+
+            <!-- Color Selection -->
+            <div class="color-section" id="color-section">
+                <div class="color-group">
+                    <span class="color-label">สีหลัก</span>
+                    <div class="color-palette" id="color-palette-1">
+                        <!-- Colors will be dynamically added -->
+                    </div>
+                </div>
+                <div class="color-group">
+                    <span class="color-label">สีรอง</span>
+                    <div class="color-palette" id="color-palette-2">
+                        <!-- Colors will be dynamically added -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Action Buttons -->
+            <div class="action-buttons">
+                <button class="action-btn test-btn" id="test-btn" onclick="TestDrive()">
+                    <iconify-icon icon="solar:steering-wheel-bold"></iconify-icon>
+                    <span>ทดลองขับยานพาหนะ</span>
+                </button>
+            </div>
+            
+            <!-- 360 View Hint -->
+            <div class="view-hint">
+                <iconify-icon icon="solar:refresh-bold"></iconify-icon>
+                <span>กดคลิกซ้าย + หมุนจอ ( หมุนได้ 360 องศา )</span>
+            </div>
+
+            <!-- Divider -->
+            <div class="section-divider"></div>
+
+            <!-- Wallet Info -->
+            <div class="wallet-section">
+                <div class="wallet-row">
+                    <div class="wallet-item">
+                        <iconify-icon icon="solar:wallet-money-bold"></iconify-icon>
+                        <span>เงินสด</span>
+                        <span class="wallet-value" id="money-display">$0</span>
+                    </div>
+                    <div class="wallet-item">
+                        <iconify-icon icon="solar:card-bold"></iconify-icon>
+                        <span>ธนาคาร</span>
+                        <span class="wallet-value bank" id="bank-display">$0</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Buy Button -->
+            <button class="buy-btn" id="buy-btn" onclick="openBuyModal()">
+                <iconify-icon icon="solar:cart-large-4-bold"></iconify-icon>
+                <span>ซื้อยานพาหนะ</span>
+            </button>
+        </div>
+    </div>
+
+    <!-- Test Drive Overlay - Top Center Minimal -->
+    <div class="testdrive-overlay" id="testdrive-overlay">
+        <div class="testdrive-card">
+            <div class="testdrive-icon">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+                    <path fill="currentColor" d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10s10-4.5 10-10S17.5 2 12 2m0 2c3.5 0 6.5 2.2 7.6 5.5H4.4C5.5 6.2 8.5 4 12 4m-8 8c0-.5 0-1 .1-1.5h4.4C8.2 11 8 11.5 8 12s.2 1 .5 1.5H4.1c-.1-.5-.1-1-.1-1.5m8 8c-3.5 0-6.5-2.2-7.6-5.5h3.9c.8 1.3 2.2 2.3 3.7 2.3s2.9-1 3.7-2.3h3.9c-1.1 3.3-4.1 5.5-7.6 5.5m3.5-6.5c-.3.5-.5 1-.5 1.5s.2 1 .5 1.5h4.4c.1-.5.1-1 .1-1.5s0-1-.1-1.5z"/>
+                </svg>
+            </div>
+            <div class="testdrive-info">
+                <div class="testdrive-header">
+                    <span>ทดลองขับยานพาหนะ</span>
+                </div>
+                <div class="testdrive-content">
+                    <div class="testdrive-carname" id="testdrive-carname">ชื่อยานพาหนะ</div>
+                </div>
+            </div>
+            <div class="testdrive-timer-section">
+                <div class="testdrive-timer" id="testdrive-timer">00:00</div>
+                <div class="timer-bar">
+                    <div class="timer-fill" id="timer-fill"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Buy Modal (No Background Overlay) -->
+    <div class="buy-modal-container" id="buy-modal">
+        <div class="buy-modal">
+            <div class="modal-header">
+                <div class="modal-icon">
+                    <iconify-icon icon="solar:cart-check-bold"></iconify-icon>
+                </div>
+                <div class="modal-title">
+                    <h3>ยืนยันที่จะซื้อ</h3>
+                    <p id="modal-vehicle-name">ชื่อยานพาหนะ</p>
+                </div>
+            </div>
+
+            <div class="payment-options">
+                <button class="payment-btn" id="payment-cash" onclick="selectPayment('money')">
+                    <iconify-icon icon="solar:wallet-money-bold"></iconify-icon>
+                    <span class="payment-label">เงินสด</span>
+                    <span class="payment-amount" id="cash-amount">$0</span>
+                </button>
+                <button class="payment-btn" id="payment-bank" onclick="selectPayment('bank')">
+                    <iconify-icon icon="solar:card-bold"></iconify-icon>
+                    <span class="payment-label">ธนาคาร</span>
+                    <span class="payment-amount" id="bank-amount">$0 (+6% VAT)</span>
+                </button>
+            </div>
+
+            <div class="modal-actions">
+                <button class="modal-btn cancel-btn" onclick="closeBuyModal()">
+                    <iconify-icon icon="solar:close-circle-bold"></iconify-icon>
+                    <span>ยกเลิก</span>
+                </button>
+                <button class="modal-btn confirm-btn" onclick="confirmPurchase()">
+                    <iconify-icon icon="solar:check-circle-bold"></iconify-icon>
+                    <span>ยืนยัน</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.4.1/jquery.min.js"></script>
+    <script src="nui://game/ui/jquery.js" type="text/javascript"></script>
+    <script src="js/function.js"></script>
+    <script src="js/script.js"></script>
+</body>
+
+</html>

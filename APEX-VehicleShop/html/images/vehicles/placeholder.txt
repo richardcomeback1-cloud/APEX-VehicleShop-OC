@@ -1,0 +1,9 @@
+Place vehicle images here.
+Supported formats: .png, .jpg, .jpeg, .webp
+
+Example filenames:
+- bmx.png
+- adder.png
+- zentorno.png
+
+Configure image paths in config-image.lua
