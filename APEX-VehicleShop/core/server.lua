@@ -64,6 +64,160 @@ local WEBHOOK_QUEUE_WARN_SIZE = tonumber((Config and Config.Security and Config.
 local PLAYER_CACHE_TTL_MS = tonumber((Config and Config.Security and Config.Security.PlayerCacheTtlMs) or 1000) or 1000
 
 local lastPruneAt = 0
+
+
+VehicleShopModules = VehicleShopModules or {}
+VehicleShopModules.Player = VehicleShopModules.Player or {}
+VehicleShopModules.Inventory = VehicleShopModules.Inventory or {}
+VehicleShopModules.Economy = VehicleShopModules.Economy or {}
+VehicleShopModules.Jobs = VehicleShopModules.Jobs or {}
+VehicleShopModules.UI = VehicleShopModules.UI or {}
+
+local restrictedJobs = {
+    ambulance = true,
+    police = true,
+    council = true
+}
+
+function VehicleShopModules.Economy.canAfford(xPlayer, payment, amount)
+    if payment == 'cash' or payment == 'money' then
+        return xPlayer.getAccount('money').money >= amount
+    elseif payment == 'bank' then
+        return xPlayer.getAccount('bank').money >= amount
+    end
+    return false
+end
+
+function VehicleShopModules.Economy.removeMoney(xPlayer, payment, amount)
+    if payment == 'cash' or payment == 'money' then
+        xPlayer.removeAccountMoney('money', amount)
+    elseif payment == 'bank' then
+        xPlayer.removeAccountMoney('bank', amount)
+    end
+end
+
+function VehicleShopModules.Inventory.countItem(xPlayer, itemName)
+    if not xPlayer or not xPlayer.getInventoryItem then
+        return 0
+    end
+
+    local item = xPlayer.getInventoryItem(itemName)
+    if item and item.count then
+        return tonumber(item.count) or 0
+    end
+
+    return 0
+end
+
+function VehicleShopModules.Jobs.isRestricted(category)
+    return restrictedJobs[tostring(category)] == true
+end
+
+function VehicleShopModules.Jobs.canAccessVehicle(xPlayer, cfg)
+    if not cfg then
+        return false
+    end
+
+    local category = tostring(cfg.category or '')
+    if not VehicleShopModules.Jobs.isRestricted(category) then
+        return true
+    end
+
+    if not xPlayer or not xPlayer.job then
+        return false
+    end
+
+    if xPlayer.job.name ~= category then
+        return false
+    end
+
+    local grade = tonumber(cfg.grade or 0) or 0
+    return (xPlayer.job.grade or 0) >= grade
+end
+
+local cache = {}
+
+function VehicleShopModules.Player.getCached(esx, src, ttlMs)
+    local now = GetGameTimer()
+    local cached = cache[src]
+    if cached and cached.expiresAt > now and cached.value then
+        return cached.value
+    end
+
+    local xPlayer = esx.GetPlayerFromId(src)
+    cache[src] = {
+        value = xPlayer,
+        expiresAt = now + (tonumber(ttlMs) or 1000)
+    }
+
+    return xPlayer
+end
+
+function VehicleShopModules.Player.invalidate(src)
+    cache[src] = nil
+end
+
+function VehicleShopModules.Player.prune()
+    local now = GetGameTimer()
+    for src, entry in pairs(cache) do
+        if (not entry) or now > (tonumber(entry.expiresAt) or 0) then
+            cache[src] = nil
+        end
+    end
+end
+
+function VehicleShopModules.Player.getSteamIdentifier(xPlayer)
+    local ids = xPlayer.getIdentifiers and xPlayer.getIdentifiers() or GetPlayerIdentifiers(xPlayer.source)
+    if ids then
+        for _, id in pairs(ids) do
+            if type(id) == 'string' and id:sub(1, 6) == 'steam:' then
+                return id
+            end
+        end
+    end
+    return 'N/A'
+end
+
+function VehicleShopModules.Player.getDiscordIdentifier(xPlayer)
+    local ids = xPlayer.getIdentifiers and xPlayer.getIdentifiers() or GetPlayerIdentifiers(xPlayer.source)
+    if ids then
+        for _, id in pairs(ids) do
+            if type(id) == 'string' and id:sub(1, 8) == 'discord:' then
+                return id
+            end
+        end
+    end
+    return 'N/A'
+end
+
+function VehicleShopModules.Player.getDiscordUserId(discordIdentifier)
+    local raw = tostring(discordIdentifier or '')
+    local discordId = raw:match('^discord:(%d+)$')
+    return discordId or 'N/A'
+end
+
+function VehicleShopModules.UI.buildPurchaseEmbed(data)
+    return {
+        {
+            ["color"] = 0x2ECC71,
+            ["description"] =
+                "**INFORMATION - ข้อมูล**\n" ..
+                "Name : `" .. tostring(data.playerName or 'N/A') .. "`\n" ..
+                "Discord Name : `" .. tostring(data.discordName or 'N/A') .. "`\n" ..
+                "Discord Identifier : `" .. tostring(data.discordIdentifier or 'N/A') .. "`\n" ..
+                "SteamID : `" .. tostring(data.steamId or 'N/A') .. "`\n\n" ..
+                "**VEHICLE - ข้อมูลรถ**\n" ..
+                "Car : `" .. tostring(data.carName or 'N/A') .. "`\n" ..
+                "Model : `" .. tostring(data.model or 'N/A') .. "`\n" ..
+                "Nameplate : `" .. tostring(data.plate or 'N/A') .. "`\n" ..
+                "Price : `" .. tostring(data.price or '0') .. "`",
+            ["footer"] = {
+                ["text"] = "Time • " .. os.date("%d/%m/%Y %I:%M %p")
+            }
+        }
+    }
+end
+
 local vehicleConfigIndex = nil
 local upsertAttemptIndex = 1
 

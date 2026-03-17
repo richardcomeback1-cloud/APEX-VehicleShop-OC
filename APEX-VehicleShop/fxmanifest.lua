@@ -8,11 +8,6 @@ client_scripts {
 	'config.lua',
 	'config-notify.lua',
 	'config-image.lua',
-	'core/modules/vehicleshop_player_client.lua',
-	'core/modules/vehicleshop_inventory_client.lua',
-	'core/modules/vehicleshop_economy_client.lua',
-	'core/modules/vehicleshop_permissions_client.lua',
-	'core/modules/vehicleshop_ui_client.lua',
 	'core/client.lua',
 	'core/utils.lua',
 	'function/function_client.lua',
@@ -21,11 +16,6 @@ client_scripts {
 server_scripts {
 	'@oxmysql/lib/MySQL.lua',
 	'config.lua',
-	'core/modules/vehicleshop_player_server.lua',
-	'core/modules/vehicleshop_inventory_server.lua',
-	'core/modules/vehicleshop_economy_server.lua',
-	'core/modules/vehicleshop_permissions_server.lua',
-	'core/modules/vehicleshop_webhook_ui_server.lua',
 	'core/server.lua',
 	'function/function_server.lua'
 }
