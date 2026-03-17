@@ -24,10 +24,10 @@ local function ensureShopControlThread()
 end
 
 function DeleteShopInsideVehicles()
-	while #ValDev.LastVehicles > 0 do
-		local vehicle = ValDev.LastVehicles[1]
+	for i = #ValDev.LastVehicles, 1, -1 do
+		local vehicle = ValDev.LastVehicles[i]
 		ESX.Game.DeleteVehicle(vehicle)
-		table.remove(ValDev.LastVehicles, 1)
+		ValDev.LastVehicles[i] = nil
 	end
 end
 
@@ -92,88 +92,64 @@ end)
 
 
 function GetCategory(vehiclesByCategory)
-	local job = ESX.GetPlayerData().job.name
-	local grade = ESX.GetPlayerData().job.grade
+	local playerData = ESX.GetPlayerData() or {}
+	local jobData = playerData.job or {}
+	local job = jobData.name
+	local grade = tonumber(jobData.grade) or 0
+	local cardMcCount = CheckCount('card_mc')
+	local cardGangCount = CheckCount('card_gang')
+	local hasMc = cardMcCount > 0
+	local hasGang = cardGangCount > 0
 	local data = {}
 	local data2 = {}
-	for k,v in pairs(Config["Category"]) do 
-		if v.index == 'ambulance' and job == 'ambulance'  then 
-			
-			table.insert( data, {
-				label = v.label,
-				index = v.index,
-			})
-		elseif v.index == 'police' and job == 'police' then 
-			table.insert( data, {
-				label = v.label,
-				index = v.index,
-			})
-		elseif v.index == 'council' and job == 'council' then 
-			table.insert( data, {
-				label = v.label,
-				index = v.index,
-			})
-		elseif v.index == 'mcclub' and CheckCount('card_mc') > 0 then 
-			table.insert( data, {
-				label = v.label,
-				index = v.index,
-			})
-		elseif v.index == 'gang' and CheckCount('card_gang') > 0 then 
-			table.insert( data, {
-				label = v.label,
-				index = v.index,
-			})
+
+	for _, v in pairs(Config["Category"]) do
+		local allowed = false
+		if v.index == 'ambulance' then
+			allowed = job == 'ambulance'
+		elseif v.index == 'police' then
+			allowed = job == 'police'
+		elseif v.index == 'council' then
+			allowed = job == 'council'
+		elseif v.index == 'mcclub' then
+			allowed = hasMc
+		elseif v.index == 'gang' then
+			allowed = hasGang
 		else
-			if v.index ~= 'ambulance' and v.index ~= 'police' and v.index ~= 'council' and v.index ~= 'mcclub' and v.index ~= 'gang' then 
-			
-				table.insert( data, {
-					label = v.label,
-					index = v.index,
-				})
-			end
+			allowed = true
+		end
+
+		if allowed then
+			data[#data + 1] = { label = v.label, index = v.index }
 		end
 	end
-	local das = vehiclesByCategory
-	for k,v in pairs(das) do 
-		for a,b in pairs(das[k]) do 
-			if k == 'ambulance' and job == 'ambulance' and grade >= b.grade  then 
-				
-				if not data2[k] then  
-					data2[k] = {}
-				end
-				table.insert( data2[k], b )
-			elseif k == 'police' and job == 'police' and grade >= b.grade then 
-				if not data2[k] then  
-					data2[k] = {}
-				end
-				table.insert( data2[k], b )
-			elseif k == 'council' and job == 'council' and grade >= b.grade then 
-				if not data2[k] then  
-					data2[k] = {}
-				end
-				table.insert( data2[k], b )
-			elseif k == 'mcclub' and CheckCount('card_mc') > 0 then 
-				if not data2[k] then  
-					data2[k] = {}
-				end
-				table.insert( data2[k], b )
-			elseif k == 'gang' and CheckCount('card_gang') > 0 then 
-				if not data2[k] then  
-					data2[k] = {}
-				end
-				table.insert( data2[k], b )
+
+	for category, vehicles in pairs(vehiclesByCategory) do
+		for i = 1, #vehicles do
+			local vehicle = vehicles[i]
+			local allowed = false
+			if category == 'ambulance' then
+				allowed = job == 'ambulance' and grade >= (tonumber(vehicle.grade) or 0)
+			elseif category == 'police' then
+				allowed = job == 'police' and grade >= (tonumber(vehicle.grade) or 0)
+			elseif category == 'council' then
+				allowed = job == 'council' and grade >= (tonumber(vehicle.grade) or 0)
+			elseif category == 'mcclub' then
+				allowed = hasMc
+			elseif category == 'gang' then
+				allowed = hasGang
 			else
-				if k ~= 'ambulance' and k ~= 'police' and k ~= 'council' and k ~= 'mcclub' and k ~= 'gang' then 
-					if not data2[k] then  
-						data2[k] = {}
-					end
-					table.insert( data2[k], b )
-				end
+				allowed = true
+			end
+
+			if allowed then
+				data2[category] = data2[category] or {}
+				table.insert(data2[category], vehicle)
 			end
 		end
 	end
-	
-	return data,data2
+
+	return data, data2
 end
 
 

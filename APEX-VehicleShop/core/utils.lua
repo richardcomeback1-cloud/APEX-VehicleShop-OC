@@ -1,43 +1,45 @@
 local NumberCharset = {}
 local Charset = {}
 
-for i = 48,  57 do table.insert(NumberCharset, string.char(i)) end
+for i = 48, 57 do NumberCharset[#NumberCharset + 1] = string.char(i) end
+for i = 65, 90 do Charset[#Charset + 1] = string.char(i) end
+for i = 97, 122 do Charset[#Charset + 1] = string.char(i) end
 
-for i = 65,  90 do table.insert(Charset, string.char(i)) end
-for i = 97, 122 do table.insert(Charset, string.char(i)) end
+local function buildRandomFromCharset(length, source)
+    local out = {}
+    for i = 1, length do
+        out[i] = source[math.random(1, #source)]
+    end
+    return table.concat(out)
+end
 
-
---แก้ไข
 function GeneratePlate()
-	math.randomseed(GetGameTimer())
-	local generatedPlate = string.upper(GetRandomLetter(Config.PlateLetters) .. (Config.PlateUseSpace and ' ' or '') .. GetRandomNumber(Config.PlateNumbers))
-	local isTaken = IsPlateTaken(generatedPlate)
-	if isTaken then 
-		return GeneratePlate()
-	end
+    local maxAttempts = 15
 
-	return generatedPlate
+    for _ = 1, maxAttempts do
+        local generatedPlate = string.upper(buildRandomFromCharset(Config.PlateLetters, Charset) .. (Config.PlateUseSpace and ' ' or '') .. buildRandomFromCharset(Config.PlateNumbers, NumberCharset))
+        if not IsPlateTaken(generatedPlate) then
+            return generatedPlate
+        end
+    end
+
+    -- Fallback with additional entropy if collisions are too high.
+    return string.upper(buildRandomFromCharset(Config.PlateLetters, Charset) .. (Config.PlateUseSpace and ' ' or '') .. buildRandomFromCharset(Config.PlateNumbers + 1, NumberCharset))
 end
 
 function IsPlateTaken(plate)
-	local p = promise.new()
-	ESX.TriggerServerCallback(Val..':isPlateTaken', function(isPlateTaken)
-		p:resolve(isPlateTaken)
-	end, plate)
+    local p = promise.new()
+    ESX.TriggerServerCallback(Val .. ':isPlateTaken', function(isPlateTaken)
+        p:resolve(isPlateTaken)
+    end, plate)
 
-	return Citizen.Await(p)
+    return Citizen.Await(p)
 end
-
-
 
 function GetRandomNumber(length)
-	Wait(0)
-	return length > 0 and GetRandomNumber(length - 1) .. NumberCharset[math.random(1, #NumberCharset)] or ''
+    return buildRandomFromCharset(length, NumberCharset)
 end
 
-
-
 function GetRandomLetter(length)
-	Wait(0)
-	return length > 0 and GetRandomLetter(length - 1) .. Charset[math.random(1, #Charset)] or ''
+    return buildRandomFromCharset(length, Charset)
 end
