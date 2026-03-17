@@ -21,11 +21,33 @@ CreateThread(function()
     fetchESX()
 end)
 
-local activeTestBuckets = {}
+-- Runtime architecture optimized for large server populations.
+local Runtime = {
+    PLAYER_CACHE = {},
+    PLAYER_PEDS = {},
+    PLAYER_STATE = {},
+    JOB_INDEX = {},
+    LOCK_SYSTEM = {},
+    WRITE_QUEUE = {
+        ownedVehicles = {},
+        head = 1,
+        tail = 0
+    },
+    TASK_SCHEDULER = {},
+    WEBHOOK_QUEUE = {
+        data = {},
+        head = 1,
+        tail = 0,
+        inFlight = false,
+        dirty = false,
+        persistScheduled = false
+    }
+}
+
 local purchaseTickets = {}
 local webhookTickets = {}
 local pendingWebhookRequests = {}
-local testDriveCooldowns = {}
+local plateTakenCache = {}
 
 local PURCHASE_TICKET_TTL_MS = 60 * 1000
 local WEBHOOK_TICKET_TTL_MS = 60 * 1000
@@ -39,36 +61,31 @@ local WEBHOOK_WORKER_TICK_MS = tonumber((Config and Config.Security and Config.S
 local WEBHOOK_RETRY_BASE_MS = tonumber((Config and Config.Security and Config.Security.WebhookRetryBaseMs) or 2000) or 2000
 local WEBHOOK_RETRY_MAX_MS = tonumber((Config and Config.Security and Config.Security.WebhookRetryMaxMs) or 60000) or 60000
 local WEBHOOK_QUEUE_WARN_SIZE = tonumber((Config and Config.Security and Config.Security.WebhookQueueWarnSize) or 200) or 200
-
-local vehicleConfigIndex = nil
-local plateTakenCache = {}
-local buyCooldowns = {}
-local saveOwnedCooldowns = {}
-local playerCache = {}
 local PLAYER_CACHE_TTL_MS = tonumber((Config and Config.Security and Config.Security.PlayerCacheTtlMs) or 1000) or 1000
 
-local webhookQueue = {}
-local webhookQueueHead = 1
-local webhookQueueTail = 0
-local webhookQueueInFlight = false
-local webhookQueueDirty = false
-local webhookPersistScheduled = false
-
-local sendPurchaseWebhook
-local pruneStateTables
-local invalidatePlayerCache
+local lastPruneAt = 0
+local vehicleConfigIndex = nil
 local upsertAttemptIndex = 1
 
 local Modules = VehicleShopModules or {}
 local PlayerModule = Modules.Player or {}
-local InventoryModule = Modules.Inventory or {}
 local EconomyModule = Modules.Economy or {}
 local JobsModule = Modules.Jobs or {}
 local UiModule = Modules.UI or {}
 
+local sendPurchaseWebhook
+
+local function compactPlate(plate)
+    local trimmed = tostring(plate or ''):gsub('^%s*(.-)%s*$', '%1'):upper()
+    return trimmed:gsub('%s+', '')
+end
+
+local function normalizePlate(plate)
+    return tostring(plate or ''):gsub('^%s*(.-)%s*$', '%1'):upper()
+end
+
 local function collectShopPoints(shop)
     local points = {}
-
     local function push(pos)
         if pos and pos.x and pos.y and pos.z then
             points[#points + 1] = vector3(pos.x, pos.y, pos.z)
@@ -82,6 +99,13 @@ local function collectShopPoints(shop)
     return points
 end
 
+local function sqrDistance(a, b)
+    local dx = a.x - b.x
+    local dy = a.y - b.y
+    local dz = a.z - b.z
+    return (dx * dx) + (dy * dy) + (dz * dz)
+end
+
 local function findShopInRange(src, maxDistance)
     local ped = GetPlayerPed(src)
     if not ped or ped == 0 then return nil end
@@ -90,64 +114,22 @@ local function findShopInRange(src, maxDistance)
     if not coords then return nil end
 
     local allowedDistance = tonumber(maxDistance) or SHOP_INTERACTION_MAX_DISTANCE
+    local maxDistSqr = allowedDistance * allowedDistance
     local nearestShopIndex = nil
-    local nearestDistance = nil
+    local nearestDistanceSqr = nil
 
     for shopIndex, shop in pairs(Config['ZONE_SHOP'] or {}) do
         local points = collectShopPoints(shop)
         for i = 1, #points do
-            local distance = #(coords - points[i])
-            if distance <= allowedDistance and (nearestDistance == nil or distance < nearestDistance) then
-                nearestDistance = distance
+            local distSqr = sqrDistance(coords, points[i])
+            if distSqr <= maxDistSqr and (not nearestDistanceSqr or distSqr < nearestDistanceSqr) then
+                nearestDistanceSqr = distSqr
                 nearestShopIndex = shopIndex
             end
         end
     end
 
     return nearestShopIndex
-end
-
-local function isPlayerNearAnyShop(src, maxDistance)
-    return findShopInRange(src, maxDistance) ~= nil
-end
-
-local function leaveTestBucket(src)
-    local state = activeTestBuckets[src]
-    if not state then return end
-
-    local targetBucket = tonumber(state.previousBucket) or 0
-    pcall(function()
-        SetPlayerRoutingBucket(src, targetBucket)
-    end)
-
-    activeTestBuckets[src] = nil
-end
-
-
-local function clearPlayerState(src)
-    leaveTestBucket(src)
-    purchaseTickets[src] = nil
-    webhookTickets[src] = nil
-    pendingWebhookRequests[src] = nil
-    testDriveCooldowns[src] = nil
-    buyCooldowns[src] = nil
-    saveOwnedCooldowns[src] = nil
-    invalidatePlayerCache(src)
-end
-
-local function enterTestBucket(src)
-    local currentBucket = 0
-    pcall(function()
-        currentBucket = GetPlayerRoutingBucket(src)
-    end)
-
-    local isolatedBucket = 50000 + src
-    activeTestBuckets[src] = {
-        previousBucket = tonumber(currentBucket) or 0,
-        currentBucket = isolatedBucket
-    }
-
-    SetPlayerRoutingBucket(src, isolatedBucket)
 end
 
 local function buildVehicleConfigIndex()
@@ -165,61 +147,165 @@ local function buildVehicleConfigIndex()
 end
 
 local function vehCfg(model)
-    local idx = buildVehicleConfigIndex()
-    return idx[tostring(model)]
+    return buildVehicleConfigIndex()[tostring(model)]
 end
 
-local function canAfford(xPlayer, payment, amount)
-    if EconomyModule.canAfford then
-        return EconomyModule.canAfford(xPlayer, payment, amount)
-    end
-    return false
+local function lockAcquire(key)
+    if Runtime.LOCK_SYSTEM[key] then return false end
+    Runtime.LOCK_SYSTEM[key] = true
+    return true
 end
 
-local function removeMoney(xPlayer, payment, amount)
-    if EconomyModule.removeMoney then
-        EconomyModule.removeMoney(xPlayer, payment, amount)
-    end
+local function lockRelease(key)
+    Runtime.LOCK_SYSTEM[key] = nil
 end
 
-local function normalizePlate(plate)
-    local trimmed = tostring(plate or ''):gsub('^%s*(.-)%s*$', '%1')
-    return trimmed:upper()
-end
-
-local function compactPlate(plate)
-    local compacted = normalizePlate(plate):gsub('%s+', '')
-    return compacted
-end
-
-local function isOnCooldown(map, key, cooldownMs)
+local function isOnCooldown(state, cooldownKey, cooldownMs)
     local now = GetGameTimer()
-    local readyAt = tonumber(map[key] or 0) or 0
+    state.cooldowns = state.cooldowns or {}
+    local readyAt = tonumber(state.cooldowns[cooldownKey] or 0) or 0
     if now < readyAt then
         return true
     end
-    map[key] = now + (tonumber(cooldownMs) or 0)
+
+    state.cooldowns[cooldownKey] = now + (tonumber(cooldownMs) or 0)
     return false
+end
+
+local function getPlayerState(src)
+    local state = Runtime.PLAYER_STATE[src]
+    if state then return state end
+
+    state = {
+        cooldowns = {},
+        flags = {},
+        activeTestBucket = nil,
+        webhooks = {}
+    }
+    Runtime.PLAYER_STATE[src] = state
+    return state
+end
+
+local function jobIndexRemove(src, jobName)
+    if not jobName or jobName == '' then return end
+    local bucket = Runtime.JOB_INDEX[jobName]
+    if not bucket then return end
+    bucket[src] = nil
+    if next(bucket) == nil then
+        Runtime.JOB_INDEX[jobName] = nil
+    end
+end
+
+local function jobIndexSet(src, newJob)
+    local state = getPlayerState(src)
+    local oldJob = state.flags.jobName
+    if oldJob then
+        jobIndexRemove(src, oldJob)
+    end
+
+    if newJob and newJob ~= '' then
+        Runtime.JOB_INDEX[newJob] = Runtime.JOB_INDEX[newJob] or {}
+        Runtime.JOB_INDEX[newJob][src] = true
+    end
+
+    state.flags.jobName = newJob
 end
 
 local function getPlayerCached(src)
     fetchESX()
-    if PlayerModule.getCached then
-        return PlayerModule.getCached(ESX, src, PLAYER_CACHE_TTL_MS)
+
+    local now = GetGameTimer()
+    local cached = Runtime.PLAYER_CACHE[src]
+    if cached and cached.expiresAt > now and cached.value then
+        return cached.value
     end
-    return ESX.GetPlayerFromId(src)
+
+    local xPlayer
+    if PlayerModule.getCached then
+        xPlayer = PlayerModule.getCached(ESX, src, PLAYER_CACHE_TTL_MS)
+    else
+        xPlayer = ESX.GetPlayerFromId(src)
+    end
+
+    Runtime.PLAYER_CACHE[src] = {
+        value = xPlayer,
+        expiresAt = now + PLAYER_CACHE_TTL_MS
+    }
+
+    if xPlayer and xPlayer.job and xPlayer.job.name then
+        jobIndexSet(src, xPlayer.job.name)
+    end
+
+    return xPlayer
 end
 
-invalidatePlayerCache = function(src)
+local function invalidatePlayerCache(src)
     if PlayerModule.invalidate then
         PlayerModule.invalidate(src)
     end
-    playerCache[src] = nil
+    Runtime.PLAYER_CACHE[src] = nil
+    Runtime.PLAYER_PEDS[src] = nil
+end
+
+local function getPlayerPedCached(src)
+    local now = GetGameTimer()
+    local cached = Runtime.PLAYER_PEDS[src]
+    if cached and cached.expiresAt > now and cached.value and cached.value ~= 0 then
+        return cached.value
+    end
+
+    local ped = GetPlayerPed(src)
+    if not ped or ped == 0 then return 0 end
+
+    Runtime.PLAYER_PEDS[src] = {
+        value = ped,
+        expiresAt = now + 1000
+    }
+
+    return ped
+end
+
+local function validateSource(src)
+    return type(src) == 'number' and src > 0 and GetPlayerName(src) ~= nil
+end
+
+local function validateEventContext(src, opts)
+    if not validateSource(src) then return false end
+
+    local state = getPlayerState(src)
+
+    if opts and opts.rateKey and opts.rateMs then
+        if isOnCooldown(state, opts.rateKey, opts.rateMs) then
+            return false
+        end
+    end
+
+    if opts and opts.requireShopDistance then
+        if not findShopInRange(src, tonumber(opts.requireShopDistance)) then
+            return false
+        end
+    end
+
+    if opts and opts.requirePlayer then
+        local xPlayer = getPlayerCached(src)
+        if not xPlayer then
+            return false
+        end
+
+        if opts.requireJob then
+            local job = xPlayer.job and xPlayer.job.name or ''
+            if job ~= opts.requireJob then
+                return false
+            end
+        end
+    end
+
+    return true
 end
 
 local function getPlateOwnerCached(compact)
-    local cached = plateTakenCache[compact]
     local now = GetGameTimer()
+    local cached = plateTakenCache[compact]
     if cached and cached.expiresAt > now then
         return cached.owner
     end
@@ -254,180 +340,78 @@ local function ensureOwnedVehiclesIndex(column, indexName)
     end)
 end
 
-local function cbIsPlateTaken(source, cb, plate)
-    fetchESX()
-    pruneStateTables(false)
+local function leaveTestBucket(src)
+    local state = getPlayerState(src)
+    local active = state.activeTestBucket
+    if not active then return end
 
-    local compact = compactPlate(plate)
-    if compact == '' then
-        cb(false)
-        return
-    end
+    local targetBucket = tonumber(active.previousBucket) or 0
+    pcall(function()
+        SetPlayerRoutingBucket(src, targetBucket)
+    end)
 
-    local owner = getPlateOwnerCached(compact)
-    cb(owner ~= nil and owner ~= '')
+    state.activeTestBucket = nil
 end
 
-local function cbBuyVehicle(source, cb, model, price, payment)
-    fetchESX()
-    pruneStateTables(false)
-    local xPlayer = getPlayerCached(source)
-    if not xPlayer then cb(false) return end
+local function enterTestBucket(src)
+    local state = getPlayerState(src)
+    local currentBucket = 0
 
-    if isOnCooldown(buyCooldowns, source, BUY_COOLDOWN_MS) then
-        cb(false)
-        return
-    end
+    pcall(function()
+        currentBucket = GetPlayerRoutingBucket(src)
+    end)
 
-    local cfg = vehCfg(model)
-    if not cfg or not cfg.model then cb(false) return end
-
-    local shopIndex = findShopInRange(source, SHOP_INTERACTION_MAX_DISTANCE)
-    if not shopIndex then cb(false) return end
-
-    -- ราคาเชื่อจาก server config เท่านั้น (ห้ามใช้ค่าจาก client)
-    local amount = tonumber(cfg.price or 0) or 0
-    if amount <= 0 then cb(false) return end
-
-    if JobsModule.canAccessVehicle and (not JobsModule.canAccessVehicle(xPlayer, cfg)) then
-        cb(false)
-        return
-    end
-
-    if not canAfford(xPlayer, payment, amount) then cb(false) return end
-
-    removeMoney(xPlayer, payment, amount)
-
-    local now = GetGameTimer()
-    purchaseTickets[source] = {
-        model = tostring(cfg.model),
-        shopIndex = shopIndex,
-        expiresAt = now + PURCHASE_TICKET_TTL_MS
+    local isolatedBucket = 50000 + src
+    state.activeTestBucket = {
+        previousBucket = tonumber(currentBucket) or 0,
+        currentBucket = isolatedBucket
     }
 
-    cb(true)
+    SetPlayerRoutingBucket(src, isolatedBucket)
 end
 
-CreateThread(function()
-    fetchESX()
-
-    ensureOwnedVehiclesIndex('owner', 'idx_owned_vehicles_owner')
-    ensureOwnedVehiclesIndex('plate', 'idx_owned_vehicles_plate')
-
-    ESX.RegisterServerCallback(CALLBACK_NAMESPACE .. ':isPlateTaken', cbIsPlateTaken)
-    if Val ~= CALLBACK_NAMESPACE then
-        ESX.RegisterServerCallback(Val .. ':isPlateTaken', cbIsPlateTaken)
-    end
-
-    ESX.RegisterServerCallback(CALLBACK_NAMESPACE .. ':buyVehicle', cbBuyVehicle)
-    if Val ~= CALLBACK_NAMESPACE then
-        ESX.RegisterServerCallback(Val .. ':buyVehicle', cbBuyVehicle)
-    end
-end)
-
-RegisterNetEvent(Val .. ':Vehicle:Test')
-AddEventHandler(Val .. ':Vehicle:Test', function(carname)
-    fetchESX()
-
-    local src = source
-    local cfg = vehCfg(carname)
-    if not cfg then return end
-
-    if not findShopInRange(src, SHOP_INTERACTION_MAX_DISTANCE) then return end
-
-    local xPlayer = getPlayerCached(src)
-    if not xPlayer then return end
-
-    if JobsModule.canAccessVehicle and (not JobsModule.canAccessVehicle(xPlayer, cfg)) then
-        return
-    end
-
-    local now = GetGameTimer()
-    local nextAllowedAt = testDriveCooldowns[src] or 0
-    if now < nextAllowedAt then
-        return
-    end
-
-    testDriveCooldowns[src] = now + TESTDRIVE_COOLDOWN_MS
-
+local function clearPlayerState(src)
     leaveTestBucket(src)
-    enterTestBucket(src)
+    purchaseTickets[src] = nil
+    webhookTickets[src] = nil
+    pendingWebhookRequests[src] = nil
+    jobIndexRemove(src, getPlayerState(src).flags.jobName)
+    Runtime.PLAYER_STATE[src] = nil
+    invalidatePlayerCache(src)
+end
 
-    TriggerClientEvent(Val .. ':TestCar:Client', src, carname)
-end)
-
-RegisterNetEvent(Val .. ':ExitTest')
-AddEventHandler(Val .. ':ExitTest', function()
-    leaveTestBucket(source)
-end)
-
-AddEventHandler('playerDropped', function()
-    clearPlayerState(source)
-    pruneStateTables(true)
-end)
-
-AddEventHandler('onResourceStop', function(resourceName)
-    if resourceName ~= GetCurrentResourceName() then return end
-
-    for src in pairs(activeTestBuckets) do
-        clearPlayerState(src)
+local function canAfford(xPlayer, payment, amount)
+    if EconomyModule.canAfford then
+        return EconomyModule.canAfford(xPlayer, payment, amount)
     end
-    pruneStateTables(true)
-end)
+    return false
+end
 
-local lastPruneAt = 0
-pruneStateTables = function(force)
-    local now = GetGameTimer()
-    if not force and (now - lastPruneAt) < 2000 then
-        return
+local function removeMoney(xPlayer, payment, amount)
+    if EconomyModule.removeMoney then
+        EconomyModule.removeMoney(xPlayer, payment, amount)
     end
-    lastPruneAt = now
+end
 
-    for src, ticket in pairs(purchaseTickets) do
-        if now > (tonumber(ticket.expiresAt) or 0) then
-            purchaseTickets[src] = nil
-        end
-    end
+local function queueOwnedVehicleWrite(payload)
+    Runtime.WRITE_QUEUE.tail = Runtime.WRITE_QUEUE.tail + 1
+    Runtime.WRITE_QUEUE.ownedVehicles[Runtime.WRITE_QUEUE.tail] = payload
+end
 
-    for src, ticket in pairs(webhookTickets) do
-        if now > (tonumber(ticket.expiresAt) or 0) then
-            webhookTickets[src] = nil
-        end
+local function popOwnedVehicleWrite()
+    local item = Runtime.WRITE_QUEUE.ownedVehicles[Runtime.WRITE_QUEUE.head]
+    if not item then return nil end
+
+    Runtime.WRITE_QUEUE.ownedVehicles[Runtime.WRITE_QUEUE.head] = nil
+    Runtime.WRITE_QUEUE.head = Runtime.WRITE_QUEUE.head + 1
+
+    if Runtime.WRITE_QUEUE.head > Runtime.WRITE_QUEUE.tail then
+        Runtime.WRITE_QUEUE.head = 1
+        Runtime.WRITE_QUEUE.tail = 0
+        Runtime.WRITE_QUEUE.ownedVehicles = {}
     end
 
-    for src, request in pairs(pendingWebhookRequests) do
-        if now > (tonumber(request.expiresAt) or 0) then
-            pendingWebhookRequests[src] = nil
-        end
-    end
-
-    for compact, data in pairs(plateTakenCache) do
-        if not data or now > (tonumber(data.expiresAt) or 0) then
-            plateTakenCache[compact] = nil
-        end
-    end
-
-    for src, readyAt in pairs(buyCooldowns) do
-        if now > ((tonumber(readyAt) or 0) + 15000) then
-            buyCooldowns[src] = nil
-        end
-    end
-
-    for src, readyAt in pairs(saveOwnedCooldowns) do
-        if now > ((tonumber(readyAt) or 0) + 15000) then
-            saveOwnedCooldowns[src] = nil
-        end
-    end
-
-    if PlayerModule.prune then
-        PlayerModule.prune()
-    else
-        for src, cached in pairs(playerCache) do
-            if not cached or now > (tonumber(cached.expiresAt) or 0) then
-                playerCache[src] = nil
-            end
-        end
-    end
+    return item
 end
 
 local function upsertOwnedVehicle(identifier, plate, vehicleJson, vehicleType, jobName, vehicleName, healthVehicleJson)
@@ -493,6 +477,33 @@ local function upsertOwnedVehicle(identifier, plate, vehicleJson, vehicleType, j
     return false
 end
 
+local function flushWriteQueue()
+    local processed = 0
+    while processed < 50 do
+        local item = popOwnedVehicleWrite()
+        if not item then
+            break
+        end
+
+        local ok = upsertOwnedVehicle(item.identifier, item.plate, item.vehicleJson, item.vehicleType, item.jobName, item.vehicleName, item.healthVehicleJson)
+        if not ok then
+            -- Retry by pushing back to queue tail to avoid data loss under transient DB issues.
+            queueOwnedVehicleWrite(item)
+            break
+        end
+
+        processed = processed + 1
+    end
+end
+
+local function isPlateOwnedByAnother(identifier, plate)
+    local owner = getPlateOwnerCached(compactPlate(plate))
+    if not owner or owner == '' then
+        return false
+    end
+    return owner ~= tostring(identifier)
+end
+
 local function buildGarageVehiclePayload(cfg, vehicleProps, plate, vehicleJson)
     local jobName = tostring(cfg.category or '')
     local isJobVehicle = jobName == 'ambulance' or jobName == 'police' or jobName == 'council'
@@ -519,7 +530,6 @@ local function syncVehicleToGarage(src, cfg, vehicleProps, plate, vehicleJson)
     if GetResourceState('APEX-Garage') ~= 'started' then return end
 
     local payload = buildGarageVehiclePayload(cfg, vehicleProps, plate, vehicleJson)
-
     local ok = pcall(function()
         exports['APEX-Garage']:SyncOwnedVehicle(src, payload)
     end)
@@ -529,170 +539,249 @@ local function syncVehicleToGarage(src, cfg, vehicleProps, plate, vehicleJson)
     end
 end
 
-local function isPlateOwnedByAnother(identifier, plate)
-    local owner = getPlateOwnerCached(compactPlate(plate))
-    if not owner or owner == '' then
-        return false
-    end
-    return owner ~= tostring(identifier)
-end
-
-local function saveOwnedVehicle(src, vehicleProps, purchaseModel)
-    fetchESX()
-    pruneStateTables(false)
-    local xPlayer = getPlayerCached(src)
-    if not xPlayer then return false end
-    if type(vehicleProps) ~= 'table' then return false end
-
-    if isOnCooldown(saveOwnedCooldowns, src, OWNED_SAVE_COOLDOWN_MS) then
-        return false
-    end
-
-    local identifier = xPlayer.getIdentifier and xPlayer.getIdentifier() or xPlayer.identifier
-    if not identifier or identifier == '' then return false end
-
-    local ticket = purchaseTickets[src]
-    if not ticket then return false end
-
+local function pruneStateTables(force)
     local now = GetGameTimer()
-    if now > (tonumber(ticket.expiresAt) or 0) then
-        purchaseTickets[src] = nil
-        return false
+    if not force and (now - lastPruneAt) < 2500 then
+        return
     end
+    lastPruneAt = now
 
-    local model = tostring(purchaseModel or '')
-    if model == '' then return false end
-    if model ~= tostring(ticket.model) then return false end
-
-    local cfg = vehCfg(model)
-    if not cfg then return false end
-
-    local ticketShopIndex = tonumber(ticket.shopIndex)
-    if ticketShopIndex then
-        local currentShopIndex = findShopInRange(src, SHOP_SAVE_MAX_DISTANCE)
-        if currentShopIndex ~= ticketShopIndex then return false end
-    elseif not isPlayerNearAnyShop(src, SHOP_SAVE_MAX_DISTANCE) then
-        return false
-    end
-
-    local plate = normalizePlate(vehicleProps.plate)
-    if plate == '' then return false end
-    if isPlateOwnedByAnother(identifier, plate) then return false end
-
-    local expectedModelHash = GetHashKey(cfg.model)
-    if type(vehicleProps.model) == 'number' and vehicleProps.model ~= expectedModelHash then
-        return false
-    end
-
-    vehicleProps.plate = plate
-    vehicleProps.model = expectedModelHash
-
-    local resolvedVehicleName = tostring(cfg.name or cfg.model or '')
-    local vehicleJson = json.encode(vehicleProps)
-    local vehicleType = tostring(vehicleProps.type or 'car')
-    local jobName = cfg.category
-    local healthVehicleJson = json.encode({
-        engine = tonumber(vehicleProps.engineHealth) or 1000.0,
-        fuel = tonumber(vehicleProps.fuelLevel) or 100.0,
-        health_body = tonumber(vehicleProps.bodyHealth) or 1000.0,
-        tyres = {},
-        doors = {}
-    })
-
-    local saved = upsertOwnedVehicle(identifier, plate, vehicleJson, vehicleType, jobName, resolvedVehicleName, healthVehicleJson)
-    if not saved then return false end
-
-    plateTakenCache[compactPlate(plate)] = {
-        owner = tostring(identifier),
-        expiresAt = GetGameTimer() + PLATE_CACHE_TTL_MS
-    }
-
-    purchaseTickets[src] = nil
-    webhookTickets[src] = {
-        model = tostring(cfg.model),
-        plate = plate,
-        expiresAt = now + WEBHOOK_TICKET_TTL_MS
-    }
-
-    local pending = pendingWebhookRequests[src]
-    if pending then
-        local pendingModel = tostring(pending.model or '')
-        local pendingPlate = normalizePlate(pending.plate)
-        if pendingModel == tostring(cfg.model) and pendingPlate == plate then
-            webhookTickets[src] = nil
-            pendingWebhookRequests[src] = nil
-            sendPurchaseWebhook(src, tostring(cfg.model), plate)
+    for src, ticket in pairs(purchaseTickets) do
+        if now > (tonumber(ticket.expiresAt) or 0) then
+            purchaseTickets[src] = nil
         end
     end
 
-    syncVehicleToGarage(src, cfg, vehicleProps, plate, vehicleJson)
-
-    return true
-end
-
-RegisterNetEvent(CALLBACK_NAMESPACE .. ':setVehicleOwned')
-AddEventHandler(CALLBACK_NAMESPACE .. ':setVehicleOwned', function(vehicleProps, jobName, vehicleName, purchaseModel)
-    saveOwnedVehicle(source, vehicleProps, purchaseModel)
-end)
-
-if Val ~= CALLBACK_NAMESPACE then
-    RegisterNetEvent(Val .. ':setVehicleOwned')
-    AddEventHandler(Val .. ':setVehicleOwned', function(vehicleProps, jobName, vehicleName, purchaseModel)
-        saveOwnedVehicle(source, vehicleProps, purchaseModel)
-    end)
-end
-
-
-local function getSteamIdentifier(xPlayer)
-    if PlayerModule.getSteamIdentifier then
-        return PlayerModule.getSteamIdentifier(xPlayer)
+    for src, ticket in pairs(webhookTickets) do
+        if now > (tonumber(ticket.expiresAt) or 0) then
+            webhookTickets[src] = nil
+        end
     end
-    return 'N/A'
+
+    for src, pending in pairs(pendingWebhookRequests) do
+        if now > (tonumber(pending.expiresAt) or 0) then
+            pendingWebhookRequests[src] = nil
+        end
+    end
+
+    for compact, data in pairs(plateTakenCache) do
+        if (not data) or now > (tonumber(data.expiresAt) or 0) then
+            plateTakenCache[compact] = nil
+        end
+    end
+
+    if PlayerModule.prune then
+        PlayerModule.prune()
+    end
+
+    for src, cached in pairs(Runtime.PLAYER_CACHE) do
+        if (not cached) or now > (tonumber(cached.expiresAt) or 0) then
+            Runtime.PLAYER_CACHE[src] = nil
+        end
+    end
+
+    for src, cached in pairs(Runtime.PLAYER_PEDS) do
+        if (not cached) or now > (tonumber(cached.expiresAt) or 0) then
+            Runtime.PLAYER_PEDS[src] = nil
+        end
+    end
 end
 
-local function getDiscordIdentifier(xPlayer)
-    if PlayerModule.getDiscordIdentifier then
-        return PlayerModule.getDiscordIdentifier(xPlayer)
+local function cbIsPlateTaken(source, cb, plate)
+    if not validateSource(source) then cb(false) return end
+    if type(plate) ~= 'string' then cb(false) return end
+
+    pruneStateTables(false)
+
+    local compact = compactPlate(plate)
+    if compact == '' then
+        cb(false)
+        return
     end
-    return 'N/A'
+
+    local owner = getPlateOwnerCached(compact)
+    cb(owner ~= nil and owner ~= '')
 end
 
-local function getDiscordUserId(discordIdentifier)
-    if PlayerModule.getDiscordUserId then
-        return PlayerModule.getDiscordUserId(discordIdentifier)
+local function cbBuyVehicle(source, cb, model, _price, payment)
+    if not validateEventContext(source, {
+        rateKey = 'buy_callback',
+        rateMs = BUY_COOLDOWN_MS,
+        requirePlayer = true,
+        requireShopDistance = SHOP_INTERACTION_MAX_DISTANCE
+    }) then
+        cb(false)
+        return
     end
-    return 'N/A'
+
+    if type(model) ~= 'string' or model == '' then cb(false) return end
+    if type(payment) ~= 'string' then cb(false) return end
+
+    pruneStateTables(false)
+
+    local xPlayer = getPlayerCached(source)
+    if not xPlayer then cb(false) return end
+
+    local cfg = vehCfg(model)
+    if not cfg or not cfg.model then cb(false) return end
+
+    if JobsModule.canAccessVehicle and (not JobsModule.canAccessVehicle(xPlayer, cfg)) then
+        cb(false)
+        return
+    end
+
+    local amount = tonumber(cfg.price or 0) or 0
+    if amount <= 0 or not canAfford(xPlayer, payment, amount) then
+        cb(false)
+        return
+    end
+
+    removeMoney(xPlayer, payment, amount)
+
+    purchaseTickets[source] = {
+        model = tostring(cfg.model),
+        shopIndex = findShopInRange(source, SHOP_INTERACTION_MAX_DISTANCE),
+        expiresAt = GetGameTimer() + PURCHASE_TICKET_TTL_MS
+    }
+
+    cb(true)
+end
+
+local function saveOwnedVehicle(src, vehicleProps, purchaseModel)
+    if not validateEventContext(src, {
+        rateKey = 'set_vehicle_owned',
+        rateMs = OWNED_SAVE_COOLDOWN_MS,
+        requirePlayer = true,
+        requireShopDistance = SHOP_SAVE_MAX_DISTANCE
+    }) then
+        return false
+    end
+
+    if type(vehicleProps) ~= 'table' or type(purchaseModel) ~= 'string' then
+        return false
+    end
+
+    local lockKey = ('save_owned:%s'):format(src)
+    if not lockAcquire(lockKey) then
+        return false
+    end
+
+    local ok = false
+    repeat
+        pruneStateTables(false)
+
+        local xPlayer = getPlayerCached(src)
+        if not xPlayer then break end
+
+        local identifier = xPlayer.getIdentifier and xPlayer.getIdentifier() or xPlayer.identifier
+        if not identifier or identifier == '' then break end
+
+        local ticket = purchaseTickets[src]
+        if not ticket then break end
+        if GetGameTimer() > (tonumber(ticket.expiresAt) or 0) then
+            purchaseTickets[src] = nil
+            break
+        end
+
+        local model = tostring(purchaseModel or '')
+        if model == '' or model ~= tostring(ticket.model) then break end
+
+        local cfg = vehCfg(model)
+        if not cfg then break end
+
+        local ticketShopIndex = tonumber(ticket.shopIndex)
+        if ticketShopIndex and findShopInRange(src, SHOP_SAVE_MAX_DISTANCE) ~= ticketShopIndex then
+            break
+        end
+
+        local plate = normalizePlate(vehicleProps.plate)
+        if plate == '' or isPlateOwnedByAnother(identifier, plate) then break end
+
+        local expectedModelHash = GetHashKey(cfg.model)
+        if type(vehicleProps.model) == 'number' and vehicleProps.model ~= expectedModelHash then
+            break
+        end
+
+        vehicleProps.plate = plate
+        vehicleProps.model = expectedModelHash
+
+        local vehicleJson = json.encode(vehicleProps)
+        local vehicleType = tostring(vehicleProps.type or 'car')
+        local jobName = cfg.category
+        local resolvedVehicleName = tostring(cfg.name or cfg.model or '')
+        local healthVehicleJson = json.encode({
+            engine = tonumber(vehicleProps.engineHealth) or 1000.0,
+            fuel = tonumber(vehicleProps.fuelLevel) or 100.0,
+            health_body = tonumber(vehicleProps.bodyHealth) or 1000.0,
+            tyres = {},
+            doors = {}
+        })
+
+        -- Writes are queued and flushed in background batches to reduce gameplay spikes.
+        queueOwnedVehicleWrite({
+            identifier = tostring(identifier),
+            plate = plate,
+            vehicleJson = vehicleJson,
+            vehicleType = vehicleType,
+            jobName = jobName,
+            vehicleName = resolvedVehicleName,
+            healthVehicleJson = healthVehicleJson
+        })
+
+        plateTakenCache[compactPlate(plate)] = {
+            owner = tostring(identifier),
+            expiresAt = GetGameTimer() + PLATE_CACHE_TTL_MS
+        }
+
+        purchaseTickets[src] = nil
+        webhookTickets[src] = {
+            model = tostring(cfg.model),
+            plate = plate,
+            expiresAt = GetGameTimer() + WEBHOOK_TICKET_TTL_MS
+        }
+
+        local pending = pendingWebhookRequests[src]
+        if pending then
+            local pendingModel = tostring(pending.model or '')
+            local pendingPlate = normalizePlate(pending.plate)
+            if pendingModel == tostring(cfg.model) and pendingPlate == plate then
+                webhookTickets[src] = nil
+                pendingWebhookRequests[src] = nil
+                sendPurchaseWebhook(src, tostring(cfg.model), plate)
+            end
+        end
+
+        syncVehicleToGarage(src, cfg, vehicleProps, plate, vehicleJson)
+        ok = true
+    until true
+
+    lockRelease(lockKey)
+    return ok
 end
 
 local function resolveWebhookUrl()
     local fromConvar = tostring(GetConvar('val_vehicleshop_webhook_buy', '') or '')
-    if fromConvar ~= '' then
-        return fromConvar
-    end
+    if fromConvar ~= '' then return fromConvar end
 
     local strictConvarOnly = not not (Config and Config.Security and Config.Security.StrictWebhookConvarOnly)
-    if strictConvarOnly then
-        return ''
-    end
+    if strictConvarOnly then return '' end
 
-    if Config["DiscordWebhook"] and Config["DiscordWebhook"].BuyVehicle then
-        return tostring(Config["DiscordWebhook"].BuyVehicle)
+    if Config['DiscordWebhook'] and Config['DiscordWebhook'].BuyVehicle then
+        return tostring(Config['DiscordWebhook'].BuyVehicle)
     end
 
     return ''
 end
 
 local function webhookQueueSize()
-    return webhookQueueTail - webhookQueueHead + 1
+    return Runtime.WEBHOOK_QUEUE.tail - Runtime.WEBHOOK_QUEUE.head + 1
 end
 
 local function snapshotWebhookQueue()
     local out = {}
-    for i = webhookQueueHead, webhookQueueTail do
-        local item = webhookQueue[i]
-        if item then
-            out[#out + 1] = item
-        end
+    for i = Runtime.WEBHOOK_QUEUE.head, Runtime.WEBHOOK_QUEUE.tail do
+        local item = Runtime.WEBHOOK_QUEUE.data[i]
+        if item then out[#out + 1] = item end
     end
     return out
 end
@@ -705,14 +794,14 @@ local function persistWebhookQueue()
 end
 
 local function scheduleWebhookPersist()
-    if webhookPersistScheduled then return end
-    webhookPersistScheduled = true
+    if Runtime.WEBHOOK_QUEUE.persistScheduled then return end
+    Runtime.WEBHOOK_QUEUE.persistScheduled = true
 
     SetTimeout(1500, function()
-        webhookPersistScheduled = false
-        if webhookQueueDirty then
+        Runtime.WEBHOOK_QUEUE.persistScheduled = false
+        if Runtime.WEBHOOK_QUEUE.dirty then
             persistWebhookQueue()
-            webhookQueueDirty = false
+            Runtime.WEBHOOK_QUEUE.dirty = false
         end
     end)
 end
@@ -720,9 +809,9 @@ end
 local function enqueueWebhookRequest(item)
     if type(item) ~= 'table' then return end
 
-    webhookQueueTail = webhookQueueTail + 1
-    webhookQueue[webhookQueueTail] = item
-    webhookQueueDirty = true
+    Runtime.WEBHOOK_QUEUE.tail = Runtime.WEBHOOK_QUEUE.tail + 1
+    Runtime.WEBHOOK_QUEUE.data[Runtime.WEBHOOK_QUEUE.tail] = item
+    Runtime.WEBHOOK_QUEUE.dirty = true
     scheduleWebhookPersist()
 
     local qSize = webhookQueueSize()
@@ -755,14 +844,58 @@ local function nextRetryDelayMs(attempt, retryAfterMs)
     return math.min(exp, WEBHOOK_RETRY_MAX_MS)
 end
 
+local function processWebhookQueue()
+    if Runtime.WEBHOOK_QUEUE.inFlight then return end
+
+    local item = Runtime.WEBHOOK_QUEUE.data[Runtime.WEBHOOK_QUEUE.head]
+    if not item then return end
+
+    local now = GetGameTimer()
+    if now < (tonumber(item.nextAttemptAt) or 0) then return end
+
+    Runtime.WEBHOOK_QUEUE.inFlight = true
+
+    PerformHttpRequest(item.url, function(statusCode, _responseBody, headers)
+        local status = tonumber(statusCode) or 0
+
+        if status >= 200 and status < 300 then
+            Runtime.WEBHOOK_QUEUE.data[Runtime.WEBHOOK_QUEUE.head] = nil
+            Runtime.WEBHOOK_QUEUE.head = Runtime.WEBHOOK_QUEUE.head + 1
+            if Runtime.WEBHOOK_QUEUE.head > Runtime.WEBHOOK_QUEUE.tail then
+                Runtime.WEBHOOK_QUEUE.head = 1
+                Runtime.WEBHOOK_QUEUE.tail = 0
+                Runtime.WEBHOOK_QUEUE.data = {}
+            end
+            Runtime.WEBHOOK_QUEUE.dirty = true
+            scheduleWebhookPersist()
+        else
+            item.attempt = (tonumber(item.attempt) or 0) + 1
+            local delayMs = nextRetryDelayMs(item.attempt, parseRetryAfterMs(headers))
+            item.nextAttemptAt = GetGameTimer() + delayMs
+            Runtime.WEBHOOK_QUEUE.dirty = true
+            scheduleWebhookPersist()
+
+            if item.attempt == 1 or item.attempt % 5 == 0 then
+                print(('[%s] webhook send failed status=%s retry_in=%dms attempt=%d queue=%d'):format(
+                    Val,
+                    tostring(status),
+                    delayMs,
+                    item.attempt,
+                    webhookQueueSize()
+                ))
+            end
+        end
+
+        Runtime.WEBHOOK_QUEUE.inFlight = false
+    end, 'POST', json.encode(item.body), { ['Content-Type'] = 'application/json' })
+end
+
 local function loadPersistedWebhookQueue()
     local raw = LoadResourceFile(Val, 'webhook_queue.json')
     if not raw or raw == '' then return end
 
     local ok, rows = pcall(json.decode, raw)
-    if not ok or type(rows) ~= 'table' then
-        return
-    end
+    if not ok or type(rows) ~= 'table' then return end
 
     local now = GetGameTimer()
     for i = 1, #rows do
@@ -779,11 +912,31 @@ local function loadPersistedWebhookQueue()
     end
 end
 
+local function getSteamIdentifier(xPlayer)
+    if PlayerModule.getSteamIdentifier then
+        return PlayerModule.getSteamIdentifier(xPlayer)
+    end
+    return 'N/A'
+end
+
+local function getDiscordIdentifier(xPlayer)
+    if PlayerModule.getDiscordIdentifier then
+        return PlayerModule.getDiscordIdentifier(xPlayer)
+    end
+    return 'N/A'
+end
+
+local function getDiscordUserId(discordIdentifier)
+    if PlayerModule.getDiscordUserId then
+        return PlayerModule.getDiscordUserId(discordIdentifier)
+    end
+    return 'N/A'
+end
+
 sendPurchaseWebhook = function(src, carKey, plate)
     local url = resolveWebhookUrl()
     if url == '' then return end
 
-    fetchESX()
     local xPlayer = getPlayerCached(src)
     if not xPlayer then return end
 
@@ -794,7 +947,7 @@ sendPurchaseWebhook = function(src, carKey, plate)
     local steamId = getSteamIdentifier(xPlayer)
     local discordIdentifier = getDiscordIdentifier(xPlayer)
     local discordUserId = getDiscordUserId(discordIdentifier)
-    local discordName = GetPlayerName(src) or ('ID '..src)
+    local discordName = GetPlayerName(src) or ('ID ' .. src)
     local playerName = xPlayer.getName and xPlayer.getName() or discordName
 
     local embed = UiModule.buildPurchaseEmbed and UiModule.buildPurchaseEmbed({
@@ -808,14 +961,12 @@ sendPurchaseWebhook = function(src, carKey, plate)
         price = tostring(price)
     }) or {}
 
-    local body = {
-        username = "VAL Legacy [LOG]",
-        embeds = embed
-    }
-
     enqueueWebhookRequest({
         url = url,
-        body = body,
+        body = {
+            username = 'VAL Legacy [LOG]',
+            embeds = embed
+        },
         attempt = 0,
         nextAttemptAt = GetGameTimer(),
         createdAt = GetGameTimer()
@@ -823,81 +974,134 @@ sendPurchaseWebhook = function(src, carKey, plate)
 end
 
 CreateThread(function()
+    fetchESX()
+
+    ensureOwnedVehiclesIndex('owner', 'idx_owned_vehicles_owner')
+    ensureOwnedVehiclesIndex('plate', 'idx_owned_vehicles_plate')
+
+    ESX.RegisterServerCallback(CALLBACK_NAMESPACE .. ':isPlateTaken', cbIsPlateTaken)
+    ESX.RegisterServerCallback(CALLBACK_NAMESPACE .. ':buyVehicle', cbBuyVehicle)
+
+    if Val ~= CALLBACK_NAMESPACE then
+        ESX.RegisterServerCallback(Val .. ':isPlateTaken', cbIsPlateTaken)
+        ESX.RegisterServerCallback(Val .. ':buyVehicle', cbBuyVehicle)
+    end
+
     loadPersistedWebhookQueue()
+end)
 
+-- Central scheduler: one lightweight loop for recurring background tasks.
+Runtime.TASK_SCHEDULER = {
+    { name = 'state_prune', interval = 2500, runAt = 0, fn = function() pruneStateTables(false) end },
+    { name = 'write_queue_flush', interval = 10000, runAt = 0, fn = flushWriteQueue },
+    { name = 'webhook_worker', interval = WEBHOOK_WORKER_TICK_MS, runAt = 0, fn = processWebhookQueue }
+}
+
+CreateThread(function()
     while true do
-        Wait(WEBHOOK_WORKER_TICK_MS)
-
-        if webhookQueueInFlight then
-            goto continue
-        end
-
-        local item = webhookQueue[webhookQueueHead]
-        if not item then
-            goto continue
-        end
-
         local now = GetGameTimer()
-        if now < (tonumber(item.nextAttemptAt) or 0) then
-            goto continue
+        local sleep = 1000
+
+        for i = 1, #Runtime.TASK_SCHEDULER do
+            local task = Runtime.TASK_SCHEDULER[i]
+            if now >= (task.runAt or 0) then
+                task.runAt = now + task.interval
+                task.fn()
+            end
+            local remaining = (task.runAt or now) - now
+            if remaining > 0 and remaining < sleep then
+                sleep = remaining
+            end
         end
 
-        webhookQueueInFlight = true
-
-        PerformHttpRequest(item.url, function(statusCode, _responseBody, headers)
-            local status = tonumber(statusCode) or 0
-
-            if status >= 200 and status < 300 then
-                webhookQueue[webhookQueueHead] = nil
-                webhookQueueHead = webhookQueueHead + 1
-                if webhookQueueHead > webhookQueueTail then
-                    webhookQueueHead = 1
-                    webhookQueueTail = 0
-                    webhookQueue = {}
-                end
-                webhookQueueDirty = true
-                scheduleWebhookPersist()
-            else
-                item.attempt = (tonumber(item.attempt) or 0) + 1
-                local retryAfterMs = parseRetryAfterMs(headers)
-                local delayMs = nextRetryDelayMs(item.attempt, retryAfterMs)
-                item.nextAttemptAt = GetGameTimer() + delayMs
-                webhookQueueDirty = true
-                scheduleWebhookPersist()
-
-                if item.attempt == 1 or item.attempt % 5 == 0 then
-                    print(('[%s] webhook send failed status=%s retry_in=%dms attempt=%d queue=%d'):format(
-                        Val,
-                        tostring(status),
-                        delayMs,
-                        item.attempt,
-                        webhookQueueSize()
-                    ))
-                end
-            end
-
-            webhookQueueInFlight = false
-        end, 'POST', json.encode(item.body), { ['Content-Type'] = 'application/json' })
-
-        ::continue::
+        Wait(math.max(50, sleep))
     end
 end)
 
-AddEventHandler('onResourceStop', function(resourceName)
-    if resourceName ~= Val then return end
-    persistWebhookQueue()
+RegisterNetEvent(Val .. ':Vehicle:Test')
+AddEventHandler(Val .. ':Vehicle:Test', function(carname)
+    local src = source
+    if not validateEventContext(src, {
+        rateKey = 'test_drive',
+        rateMs = TESTDRIVE_COOLDOWN_MS,
+        requirePlayer = true,
+        requireShopDistance = SHOP_INTERACTION_MAX_DISTANCE
+    }) then
+        return
+    end
+
+    if type(carname) ~= 'string' or carname == '' then return end
+
+    local cfg = vehCfg(carname)
+    if not cfg then return end
+
+    local xPlayer = getPlayerCached(src)
+    if JobsModule.canAccessVehicle and (not JobsModule.canAccessVehicle(xPlayer, cfg)) then
+        return
+    end
+
+    local lockKey = ('testdrive:%s'):format(src)
+    if not lockAcquire(lockKey) then
+        return
+    end
+
+    leaveTestBucket(src)
+    enterTestBucket(src)
+    lockRelease(lockKey)
+
+    TriggerClientEvent(Val .. ':TestCar:Client', src, carname)
 end)
+
+RegisterNetEvent(Val .. ':ExitTest')
+AddEventHandler(Val .. ':ExitTest', function()
+    local src = source
+    if not validateEventContext(src, { rateKey = 'exit_test', rateMs = 500, requirePlayer = false }) then
+        return
+    end
+    leaveTestBucket(src)
+end)
+
+RegisterNetEvent(CALLBACK_NAMESPACE .. ':setVehicleOwned')
+AddEventHandler(CALLBACK_NAMESPACE .. ':setVehicleOwned', function(vehicleProps, _jobName, _vehicleName, purchaseModel)
+    local src = source
+    if type(vehicleProps) ~= 'table' then return end
+    if type(purchaseModel) ~= 'string' then return end
+    saveOwnedVehicle(src, vehicleProps, purchaseModel)
+end)
+
+if Val ~= CALLBACK_NAMESPACE then
+    RegisterNetEvent(Val .. ':setVehicleOwned')
+    AddEventHandler(Val .. ':setVehicleOwned', function(vehicleProps, _jobName, _vehicleName, purchaseModel)
+        local src = source
+        if type(vehicleProps) ~= 'table' then return end
+        if type(purchaseModel) ~= 'string' then return end
+        saveOwnedVehicle(src, vehicleProps, purchaseModel)
+    end)
+end
 
 RegisterNetEvent(Val .. ':logVehiclePurchase')
 AddEventHandler(Val .. ':logVehiclePurchase', function(carKey, plate)
     local src = source
-    pruneStateTables(false)
-    local ticket = webhookTickets[src]
+    if not validateEventContext(src, {
+        rateKey = 'log_purchase',
+        rateMs = 1000,
+        requirePlayer = true
+    }) then
+        return
+    end
 
+    if type(carKey) ~= 'string' or type(plate) ~= 'string' then
+        return
+    end
+
+    pruneStateTables(false)
+
+    local ticket = webhookTickets[src]
     local now = GetGameTimer()
+
     if not ticket then
         pendingWebhookRequests[src] = {
-            model = tostring(carKey or ''),
+            model = tostring(carKey),
             plate = normalizePlate(plate),
             expiresAt = now + WEBHOOK_TICKET_TTL_MS
         }
@@ -910,7 +1114,7 @@ AddEventHandler(Val .. ':logVehiclePurchase', function(carKey, plate)
     end
 
     local cfg = vehCfg(carKey)
-    local requestedModel = cfg and tostring(cfg.model) or tostring(carKey or '')
+    local requestedModel = cfg and tostring(cfg.model) or tostring(carKey)
     local requestedPlate = normalizePlate(plate)
 
     if requestedModel ~= tostring(ticket.model) or requestedPlate ~= tostring(ticket.plate) then
@@ -919,4 +1123,37 @@ AddEventHandler(Val .. ':logVehiclePurchase', function(carKey, plate)
 
     webhookTickets[src] = nil
     sendPurchaseWebhook(src, requestedModel, requestedPlate)
+end)
+
+AddEventHandler('esx:playerLoaded', function(playerId, xPlayer)
+    local src = tonumber(playerId)
+    if not src then return end
+    invalidatePlayerCache(src)
+    if xPlayer and xPlayer.job and xPlayer.job.name then
+        jobIndexSet(src, xPlayer.job.name)
+    end
+end)
+
+AddEventHandler('esx:setJob', function(playerId, job)
+    local src = tonumber(playerId)
+    if not src then return end
+    jobIndexSet(src, job and job.name or nil)
+    invalidatePlayerCache(src)
+end)
+
+AddEventHandler('playerDropped', function()
+    clearPlayerState(source)
+    pruneStateTables(true)
+end)
+
+AddEventHandler('onResourceStop', function(resourceName)
+    if resourceName ~= Val then return end
+
+    for _, src in ipairs(GetPlayers()) do
+        clearPlayerState(tonumber(src))
+    end
+
+    persistWebhookQueue()
+    flushWriteQueue()
+    flushWriteQueue()
 end)
