@@ -14,6 +14,91 @@ ValDev = {
 cam = nil
 local num = 0
 
+VehicleShopClientModules = VehicleShopClientModules or {}
+VehicleShopClientModules.Player = VehicleShopClientModules.Player or {}
+VehicleShopClientModules.Inventory = VehicleShopClientModules.Inventory or {}
+VehicleShopClientModules.Economy = VehicleShopClientModules.Economy or {}
+VehicleShopClientModules.Jobs = VehicleShopClientModules.Jobs or {}
+VehicleShopClientModules.UI = VehicleShopClientModules.UI or {}
+
+function VehicleShopClientModules.Player.getData(esx)
+    if not esx or not esx.GetPlayerData then
+        return {}
+    end
+
+    return esx.GetPlayerData() or {}
+end
+
+function VehicleShopClientModules.Player.getJob(esx)
+    local data = VehicleShopClientModules.Player.getData(esx)
+    return data.job or {}
+end
+
+function VehicleShopClientModules.Inventory.countItem(esx, itemName)
+    local data = esx and esx.GetPlayerData and esx.GetPlayerData() or nil
+    local inventory = data and data.inventory or {}
+
+    for i = 1, #inventory do
+        local item = inventory[i]
+        if item and item.name == itemName then
+            return tonumber(item.count) or 0
+        end
+    end
+
+    return 0
+end
+
+local function getAccountMoney(esx, accountName)
+    local data = esx and esx.GetPlayerData and esx.GetPlayerData() or nil
+    local accounts = data and data.accounts or {}
+
+    for i = 1, #accounts do
+        local account = accounts[i]
+        if account and account.name == accountName then
+            return tonumber(account.money) or 0
+        end
+    end
+
+    return 0
+end
+
+function VehicleShopClientModules.Economy.getCash(esx)
+    return getAccountMoney(esx, 'money')
+end
+
+function VehicleShopClientModules.Economy.getBank(esx)
+    return getAccountMoney(esx, 'bank')
+end
+
+function VehicleShopClientModules.Jobs.matches(jobName, expected)
+    if expected == nil then
+        return true
+    end
+
+    if type(expected) == 'table' then
+        for i = 1, #expected do
+            if tostring(expected[i]) == tostring(jobName) then
+                return true
+            end
+        end
+        return false
+    end
+
+    return tostring(jobName) == tostring(expected)
+end
+
+function VehicleShopClientModules.UI.notifyByProvider(configNotify, esx, msg, level)
+    level = level or 'info'
+    local provider = (configNotify and configNotify.Provider) or 'ssr'
+
+    if provider == 'esx' and esx and esx.ShowNotification then
+        esx.ShowNotification(msg)
+        return true
+    end
+
+    return false
+end
+
 local ClientModules = VehicleShopClientModules or {}
 local ClientUi = ClientModules.UI or {}
 

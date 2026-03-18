@@ -57,14 +57,174 @@ local SHOP_SAVE_MAX_DISTANCE = tonumber((Config and Config.Security and Config.S
 local PLATE_CACHE_TTL_MS = tonumber((Config and Config.Security and Config.Security.PlateCacheTtlMs) or 10000) or 10000
 local BUY_COOLDOWN_MS = tonumber((Config and Config.Security and Config.Security.BuyCooldownMs) or 1200) or 1200
 local OWNED_SAVE_COOLDOWN_MS = tonumber((Config and Config.Security and Config.Security.SaveOwnedCooldownMs) or 1500) or 1500
+local WRITE_QUEUE_BATCH_SIZE = tonumber((Config and Config.Security and Config.Security.WriteQueueBatchSize) or 50) or 50
+local WRITE_QUEUE_ACTIVE_TICK_MS = tonumber((Config and Config.Security and Config.Security.WriteQueueActiveTickMs) or 1000) or 1000
+local WRITE_QUEUE_IDLE_TICK_MS = tonumber((Config and Config.Security and Config.Security.WriteQueueIdleTickMs) or 10000) or 10000
+local WRITE_QUEUE_WARN_SIZE = tonumber((Config and Config.Security and Config.Security.WriteQueueWarnSize) or 100) or 100
 local WEBHOOK_WORKER_TICK_MS = tonumber((Config and Config.Security and Config.Security.WebhookWorkerTickMs) or 250) or 250
+local WEBHOOK_IDLE_TICK_MS = tonumber((Config and Config.Security and Config.Security.WebhookIdleTickMs) or math.max(1000, WEBHOOK_WORKER_TICK_MS * 4)) or math.max(1000, WEBHOOK_WORKER_TICK_MS * 4)
 local WEBHOOK_RETRY_BASE_MS = tonumber((Config and Config.Security and Config.Security.WebhookRetryBaseMs) or 2000) or 2000
 local WEBHOOK_RETRY_MAX_MS = tonumber((Config and Config.Security and Config.Security.WebhookRetryMaxMs) or 60000) or 60000
 local WEBHOOK_QUEUE_WARN_SIZE = tonumber((Config and Config.Security and Config.Security.WebhookQueueWarnSize) or 200) or 200
 local PLAYER_CACHE_TTL_MS = tonumber((Config and Config.Security and Config.Security.PlayerCacheTtlMs) or 1000) or 1000
 
 local lastPruneAt = 0
+
+
+VehicleShopModules = VehicleShopModules or {}
+VehicleShopModules.Player = VehicleShopModules.Player or {}
+VehicleShopModules.Inventory = VehicleShopModules.Inventory or {}
+VehicleShopModules.Economy = VehicleShopModules.Economy or {}
+VehicleShopModules.Jobs = VehicleShopModules.Jobs or {}
+VehicleShopModules.UI = VehicleShopModules.UI or {}
+
+local restrictedJobs = {
+    ambulance = true,
+    police = true,
+    council = true
+}
+
+function VehicleShopModules.Economy.canAfford(xPlayer, payment, amount)
+    if payment == 'cash' or payment == 'money' then
+        return xPlayer.getAccount('money').money >= amount
+    elseif payment == 'bank' then
+        return xPlayer.getAccount('bank').money >= amount
+    end
+    return false
+end
+
+function VehicleShopModules.Economy.removeMoney(xPlayer, payment, amount)
+    if payment == 'cash' or payment == 'money' then
+        xPlayer.removeAccountMoney('money', amount)
+    elseif payment == 'bank' then
+        xPlayer.removeAccountMoney('bank', amount)
+    end
+end
+
+function VehicleShopModules.Inventory.countItem(xPlayer, itemName)
+    if not xPlayer or not xPlayer.getInventoryItem then
+        return 0
+    end
+
+    local item = xPlayer.getInventoryItem(itemName)
+    if item and item.count then
+        return tonumber(item.count) or 0
+    end
+
+    return 0
+end
+
+function VehicleShopModules.Jobs.isRestricted(category)
+    return restrictedJobs[tostring(category)] == true
+end
+
+function VehicleShopModules.Jobs.canAccessVehicle(xPlayer, cfg)
+    if not cfg then
+        return false
+    end
+
+    local category = tostring(cfg.category or '')
+    if not VehicleShopModules.Jobs.isRestricted(category) then
+        return true
+    end
+
+    if not xPlayer or not xPlayer.job then
+        return false
+    end
+
+    if xPlayer.job.name ~= category then
+        return false
+    end
+
+    local grade = tonumber(cfg.grade or 0) or 0
+    return (xPlayer.job.grade or 0) >= grade
+end
+
+local cache = {}
+
+function VehicleShopModules.Player.getCached(esx, src, ttlMs)
+    local now = GetGameTimer()
+    local cached = cache[src]
+    if cached and cached.expiresAt > now and cached.value then
+        return cached.value
+    end
+
+    local xPlayer = esx.GetPlayerFromId(src)
+    cache[src] = {
+        value = xPlayer,
+        expiresAt = now + (tonumber(ttlMs) or 1000)
+    }
+
+    return xPlayer
+end
+
+function VehicleShopModules.Player.invalidate(src)
+    cache[src] = nil
+end
+
+function VehicleShopModules.Player.prune()
+    local now = GetGameTimer()
+    for src, entry in pairs(cache) do
+        if (not entry) or now > (tonumber(entry.expiresAt) or 0) then
+            cache[src] = nil
+        end
+    end
+end
+
+function VehicleShopModules.Player.getSteamIdentifier(xPlayer)
+    local ids = xPlayer.getIdentifiers and xPlayer.getIdentifiers() or GetPlayerIdentifiers(xPlayer.source)
+    if ids then
+        for _, id in pairs(ids) do
+            if type(id) == 'string' and id:sub(1, 6) == 'steam:' then
+                return id
+            end
+        end
+    end
+    return 'N/A'
+end
+
+function VehicleShopModules.Player.getDiscordIdentifier(xPlayer)
+    local ids = xPlayer.getIdentifiers and xPlayer.getIdentifiers() or GetPlayerIdentifiers(xPlayer.source)
+    if ids then
+        for _, id in pairs(ids) do
+            if type(id) == 'string' and id:sub(1, 8) == 'discord:' then
+                return id
+            end
+        end
+    end
+    return 'N/A'
+end
+
+function VehicleShopModules.Player.getDiscordUserId(discordIdentifier)
+    local raw = tostring(discordIdentifier or '')
+    local discordId = raw:match('^discord:(%d+)$')
+    return discordId or 'N/A'
+end
+
+function VehicleShopModules.UI.buildPurchaseEmbed(data)
+    return {
+        {
+            ["color"] = 0x2ECC71,
+            ["description"] =
+                "**INFORMATION - ข้อมูล**\n" ..
+                "Name : `" .. tostring(data.playerName or 'N/A') .. "`\n" ..
+                "Discord Name : `" .. tostring(data.discordName or 'N/A') .. "`\n" ..
+                "Discord Identifier : `" .. tostring(data.discordIdentifier or 'N/A') .. "`\n" ..
+                "SteamID : `" .. tostring(data.steamId or 'N/A') .. "`\n\n" ..
+                "**VEHICLE - ข้อมูลรถ**\n" ..
+                "Car : `" .. tostring(data.carName or 'N/A') .. "`\n" ..
+                "Model : `" .. tostring(data.model or 'N/A') .. "`\n" ..
+                "Nameplate : `" .. tostring(data.plate or 'N/A') .. "`\n" ..
+                "Price : `" .. tostring(data.price or '0') .. "`",
+            ["footer"] = {
+                ["text"] = "Time • " .. os.date("%d/%m/%Y %I:%M %p")
+            }
+        }
+    }
+end
+
 local vehicleConfigIndex = nil
+local shopPointIndex = nil
 local upsertAttemptIndex = 1
 
 local Modules = VehicleShopModules or {}
@@ -74,6 +234,7 @@ local JobsModule = Modules.Jobs or {}
 local UiModule = Modules.UI or {}
 
 local sendPurchaseWebhook
+local getPlayerPedCached
 
 local function compactPlate(plate)
     local trimmed = tostring(plate or ''):gsub('^%s*(.-)%s*$', '%1'):upper()
@@ -99,6 +260,23 @@ local function collectShopPoints(shop)
     return points
 end
 
+local function buildShopPointIndex()
+    if shopPointIndex then return shopPointIndex end
+
+    shopPointIndex = {}
+    for shopIndex, shop in pairs(Config['ZONE_SHOP'] or {}) do
+        local points = collectShopPoints(shop)
+        if #points > 0 then
+            shopPointIndex[#shopPointIndex + 1] = {
+                shopIndex = shopIndex,
+                points = points
+            }
+        end
+    end
+
+    return shopPointIndex
+end
+
 local function sqrDistance(a, b)
     local dx = a.x - b.x
     local dy = a.y - b.y
@@ -107,7 +285,7 @@ local function sqrDistance(a, b)
 end
 
 local function findShopInRange(src, maxDistance)
-    local ped = GetPlayerPed(src)
+    local ped = getPlayerPedCached(src)
     if not ped or ped == 0 then return nil end
 
     local coords = GetEntityCoords(ped)
@@ -117,14 +295,16 @@ local function findShopInRange(src, maxDistance)
     local maxDistSqr = allowedDistance * allowedDistance
     local nearestShopIndex = nil
     local nearestDistanceSqr = nil
+    local shops = buildShopPointIndex()
 
-    for shopIndex, shop in pairs(Config['ZONE_SHOP'] or {}) do
-        local points = collectShopPoints(shop)
-        for i = 1, #points do
-            local distSqr = sqrDistance(coords, points[i])
+    for i = 1, #shops do
+        local shop = shops[i]
+        local points = shop.points
+        for pointIndex = 1, #points do
+            local distSqr = sqrDistance(coords, points[pointIndex])
             if distSqr <= maxDistSqr and (not nearestDistanceSqr or distSqr < nearestDistanceSqr) then
                 nearestDistanceSqr = distSqr
-                nearestShopIndex = shopIndex
+                nearestShopIndex = shop.shopIndex
             end
         end
     end
@@ -247,7 +427,7 @@ local function invalidatePlayerCache(src)
     Runtime.PLAYER_PEDS[src] = nil
 end
 
-local function getPlayerPedCached(src)
+getPlayerPedCached = function(src)
     local now = GetGameTimer()
     local cached = Runtime.PLAYER_PEDS[src]
     if cached and cached.expiresAt > now and cached.value and cached.value ~= 0 then
@@ -270,37 +450,39 @@ local function validateSource(src)
 end
 
 local function validateEventContext(src, opts)
-    if not validateSource(src) then return false end
+    if not validateSource(src) then return false, nil end
 
     local state = getPlayerState(src)
+    local matchedShopIndex = nil
 
     if opts and opts.rateKey and opts.rateMs then
         if isOnCooldown(state, opts.rateKey, opts.rateMs) then
-            return false
+            return false, nil
         end
     end
 
     if opts and opts.requireShopDistance then
-        if not findShopInRange(src, tonumber(opts.requireShopDistance)) then
-            return false
+        matchedShopIndex = findShopInRange(src, tonumber(opts.requireShopDistance))
+        if not matchedShopIndex then
+            return false, nil
         end
     end
 
     if opts and opts.requirePlayer then
         local xPlayer = getPlayerCached(src)
         if not xPlayer then
-            return false
+            return false, matchedShopIndex
         end
 
         if opts.requireJob then
             local job = xPlayer.job and xPlayer.job.name or ''
             if job ~= opts.requireJob then
-                return false
+                return false, matchedShopIndex
             end
         end
     end
 
-    return true
+    return true, matchedShopIndex
 end
 
 local function getPlateOwnerCached(compact)
@@ -396,6 +578,11 @@ end
 local function queueOwnedVehicleWrite(payload)
     Runtime.WRITE_QUEUE.tail = Runtime.WRITE_QUEUE.tail + 1
     Runtime.WRITE_QUEUE.ownedVehicles[Runtime.WRITE_QUEUE.tail] = payload
+
+    local qSize = Runtime.WRITE_QUEUE.tail - Runtime.WRITE_QUEUE.head + 1
+    if qSize >= WRITE_QUEUE_WARN_SIZE and qSize % 25 == 0 then
+        print(('[%s] owned vehicle write queue backlog=%d'):format(Val, qSize))
+    end
 end
 
 local function popOwnedVehicleWrite()
@@ -412,6 +599,10 @@ local function popOwnedVehicleWrite()
     end
 
     return item
+end
+
+local function writeQueueSize()
+    return Runtime.WRITE_QUEUE.tail - Runtime.WRITE_QUEUE.head + 1
 end
 
 local function upsertOwnedVehicle(identifier, plate, vehicleJson, vehicleType, jobName, vehicleName, healthVehicleJson)
@@ -478,8 +669,20 @@ local function upsertOwnedVehicle(identifier, plate, vehicleJson, vehicleType, j
 end
 
 local function flushWriteQueue()
+    local backlog = writeQueueSize()
+    if backlog <= 0 then
+        return WRITE_QUEUE_IDLE_TICK_MS
+    end
+
+    local batchSize = math.max(1, WRITE_QUEUE_BATCH_SIZE)
+    if backlog >= (WRITE_QUEUE_BATCH_SIZE * 8) then
+        batchSize = math.max(batchSize, WRITE_QUEUE_BATCH_SIZE * 4)
+    elseif backlog >= (WRITE_QUEUE_BATCH_SIZE * 4) then
+        batchSize = math.max(batchSize, WRITE_QUEUE_BATCH_SIZE * 2)
+    end
+
     local processed = 0
-    while processed < 50 do
+    while processed < batchSize do
         local item = popOwnedVehicleWrite()
         if not item then
             break
@@ -494,6 +697,12 @@ local function flushWriteQueue()
 
         processed = processed + 1
     end
+
+    if writeQueueSize() > 0 then
+        return math.max(250, WRITE_QUEUE_ACTIVE_TICK_MS)
+    end
+
+    return WRITE_QUEUE_IDLE_TICK_MS
 end
 
 local function isPlateOwnedByAnother(identifier, plate)
@@ -604,12 +813,13 @@ local function cbIsPlateTaken(source, cb, plate)
 end
 
 local function cbBuyVehicle(source, cb, model, _price, payment)
-    if not validateEventContext(source, {
+    local isValid, shopIndex = validateEventContext(source, {
         rateKey = 'buy_callback',
         rateMs = BUY_COOLDOWN_MS,
         requirePlayer = true,
         requireShopDistance = SHOP_INTERACTION_MAX_DISTANCE
-    }) then
+    })
+    if not isValid then
         cb(false)
         return
     end
@@ -640,7 +850,7 @@ local function cbBuyVehicle(source, cb, model, _price, payment)
 
     purchaseTickets[source] = {
         model = tostring(cfg.model),
-        shopIndex = findShopInRange(source, SHOP_INTERACTION_MAX_DISTANCE),
+        shopIndex = shopIndex,
         expiresAt = GetGameTimer() + PURCHASE_TICKET_TTL_MS
     }
 
@@ -648,12 +858,13 @@ local function cbBuyVehicle(source, cb, model, _price, payment)
 end
 
 local function saveOwnedVehicle(src, vehicleProps, purchaseModel)
-    if not validateEventContext(src, {
+    local isValid, currentShopIndex = validateEventContext(src, {
         rateKey = 'set_vehicle_owned',
         rateMs = OWNED_SAVE_COOLDOWN_MS,
         requirePlayer = true,
         requireShopDistance = SHOP_SAVE_MAX_DISTANCE
-    }) then
+    })
+    if not isValid then
         return false
     end
 
@@ -690,7 +901,7 @@ local function saveOwnedVehicle(src, vehicleProps, purchaseModel)
         if not cfg then break end
 
         local ticketShopIndex = tonumber(ticket.shopIndex)
-        if ticketShopIndex and findShopInRange(src, SHOP_SAVE_MAX_DISTANCE) ~= ticketShopIndex then
+        if ticketShopIndex and currentShopIndex ~= ticketShopIndex then
             break
         end
 
@@ -845,13 +1056,20 @@ local function nextRetryDelayMs(attempt, retryAfterMs)
 end
 
 local function processWebhookQueue()
-    if Runtime.WEBHOOK_QUEUE.inFlight then return end
+    if Runtime.WEBHOOK_QUEUE.inFlight then
+        return WEBHOOK_WORKER_TICK_MS
+    end
 
     local item = Runtime.WEBHOOK_QUEUE.data[Runtime.WEBHOOK_QUEUE.head]
-    if not item then return end
+    if not item then
+        return WEBHOOK_IDLE_TICK_MS
+    end
 
     local now = GetGameTimer()
-    if now < (tonumber(item.nextAttemptAt) or 0) then return end
+    local nextAttemptAt = tonumber(item.nextAttemptAt) or 0
+    if now < nextAttemptAt then
+        return math.max(50, math.min(nextAttemptAt - now, WEBHOOK_IDLE_TICK_MS))
+    end
 
     Runtime.WEBHOOK_QUEUE.inFlight = true
 
@@ -888,6 +1106,8 @@ local function processWebhookQueue()
 
         Runtime.WEBHOOK_QUEUE.inFlight = false
     end, 'POST', json.encode(item.body), { ['Content-Type'] = 'application/json' })
+
+    return WEBHOOK_WORKER_TICK_MS
 end
 
 local function loadPersistedWebhookQueue()
@@ -993,7 +1213,7 @@ end)
 -- Central scheduler: one lightweight loop for recurring background tasks.
 Runtime.TASK_SCHEDULER = {
     { name = 'state_prune', interval = 2500, runAt = 0, fn = function() pruneStateTables(false) end },
-    { name = 'write_queue_flush', interval = 10000, runAt = 0, fn = flushWriteQueue },
+    { name = 'write_queue_flush', interval = WRITE_QUEUE_IDLE_TICK_MS, runAt = 0, fn = flushWriteQueue },
     { name = 'webhook_worker', interval = WEBHOOK_WORKER_TICK_MS, runAt = 0, fn = processWebhookQueue }
 }
 
@@ -1005,8 +1225,8 @@ CreateThread(function()
         for i = 1, #Runtime.TASK_SCHEDULER do
             local task = Runtime.TASK_SCHEDULER[i]
             if now >= (task.runAt or 0) then
-                task.runAt = now + task.interval
-                task.fn()
+                local nextInterval = task.fn()
+                task.runAt = now + (tonumber(nextInterval) or task.interval)
             end
             local remaining = (task.runAt or now) - now
             if remaining > 0 and remaining < sleep then
@@ -1154,6 +1374,10 @@ AddEventHandler('onResourceStop', function(resourceName)
     end
 
     persistWebhookQueue()
-    flushWriteQueue()
-    flushWriteQueue()
+    for _ = 1, 10 do
+        if writeQueueSize() <= 0 then
+            break
+        end
+        flushWriteQueue()
+    end
 end)
