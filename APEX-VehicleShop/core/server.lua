@@ -57,6 +57,10 @@ local SHOP_SAVE_MAX_DISTANCE = tonumber((Config and Config.Security and Config.S
 local PLATE_CACHE_TTL_MS = tonumber((Config and Config.Security and Config.Security.PlateCacheTtlMs) or 10000) or 10000
 local BUY_COOLDOWN_MS = tonumber((Config and Config.Security and Config.Security.BuyCooldownMs) or 1200) or 1200
 local OWNED_SAVE_COOLDOWN_MS = tonumber((Config and Config.Security and Config.Security.SaveOwnedCooldownMs) or 1500) or 1500
+local WRITE_QUEUE_BATCH_SIZE = tonumber((Config and Config.Security and Config.Security.WriteQueueBatchSize) or 50) or 50
+local WRITE_QUEUE_ACTIVE_TICK_MS = tonumber((Config and Config.Security and Config.Security.WriteQueueActiveTickMs) or 1000) or 1000
+local WRITE_QUEUE_IDLE_TICK_MS = tonumber((Config and Config.Security and Config.Security.WriteQueueIdleTickMs) or 10000) or 10000
+local WRITE_QUEUE_WARN_SIZE = tonumber((Config and Config.Security and Config.Security.WriteQueueWarnSize) or 100) or 100
 local WEBHOOK_WORKER_TICK_MS = tonumber((Config and Config.Security and Config.Security.WebhookWorkerTickMs) or 250) or 250
 local WEBHOOK_IDLE_TICK_MS = tonumber((Config and Config.Security and Config.Security.WebhookIdleTickMs) or math.max(1000, WEBHOOK_WORKER_TICK_MS * 4)) or math.max(1000, WEBHOOK_WORKER_TICK_MS * 4)
 local WEBHOOK_RETRY_BASE_MS = tonumber((Config and Config.Security and Config.Security.WebhookRetryBaseMs) or 2000) or 2000
@@ -574,6 +578,11 @@ end
 local function queueOwnedVehicleWrite(payload)
     Runtime.WRITE_QUEUE.tail = Runtime.WRITE_QUEUE.tail + 1
     Runtime.WRITE_QUEUE.ownedVehicles[Runtime.WRITE_QUEUE.tail] = payload
+
+    local qSize = Runtime.WRITE_QUEUE.tail - Runtime.WRITE_QUEUE.head + 1
+    if qSize >= WRITE_QUEUE_WARN_SIZE and qSize % 25 == 0 then
+        print(('[%s] owned vehicle write queue backlog=%d'):format(Val, qSize))
+    end
 end
 
 local function popOwnedVehicleWrite()
@@ -590,6 +599,10 @@ local function popOwnedVehicleWrite()
     end
 
     return item
+end
+
+local function writeQueueSize()
+    return Runtime.WRITE_QUEUE.tail - Runtime.WRITE_QUEUE.head + 1
 end
 
 local function upsertOwnedVehicle(identifier, plate, vehicleJson, vehicleType, jobName, vehicleName, healthVehicleJson)
@@ -656,8 +669,20 @@ local function upsertOwnedVehicle(identifier, plate, vehicleJson, vehicleType, j
 end
 
 local function flushWriteQueue()
+    local backlog = writeQueueSize()
+    if backlog <= 0 then
+        return WRITE_QUEUE_IDLE_TICK_MS
+    end
+
+    local batchSize = math.max(1, WRITE_QUEUE_BATCH_SIZE)
+    if backlog >= (WRITE_QUEUE_BATCH_SIZE * 8) then
+        batchSize = math.max(batchSize, WRITE_QUEUE_BATCH_SIZE * 4)
+    elseif backlog >= (WRITE_QUEUE_BATCH_SIZE * 4) then
+        batchSize = math.max(batchSize, WRITE_QUEUE_BATCH_SIZE * 2)
+    end
+
     local processed = 0
-    while processed < 50 do
+    while processed < batchSize do
         local item = popOwnedVehicleWrite()
         if not item then
             break
@@ -672,6 +697,12 @@ local function flushWriteQueue()
 
         processed = processed + 1
     end
+
+    if writeQueueSize() > 0 then
+        return math.max(250, WRITE_QUEUE_ACTIVE_TICK_MS)
+    end
+
+    return WRITE_QUEUE_IDLE_TICK_MS
 end
 
 local function isPlateOwnedByAnother(identifier, plate)
@@ -1182,7 +1213,7 @@ end)
 -- Central scheduler: one lightweight loop for recurring background tasks.
 Runtime.TASK_SCHEDULER = {
     { name = 'state_prune', interval = 2500, runAt = 0, fn = function() pruneStateTables(false) end },
-    { name = 'write_queue_flush', interval = 10000, runAt = 0, fn = flushWriteQueue },
+    { name = 'write_queue_flush', interval = WRITE_QUEUE_IDLE_TICK_MS, runAt = 0, fn = flushWriteQueue },
     { name = 'webhook_worker', interval = WEBHOOK_WORKER_TICK_MS, runAt = 0, fn = processWebhookQueue }
 }
 
@@ -1343,6 +1374,10 @@ AddEventHandler('onResourceStop', function(resourceName)
     end
 
     persistWebhookQueue()
-    flushWriteQueue()
-    flushWriteQueue()
+    for _ = 1, 10 do
+        if writeQueueSize() <= 0 then
+            break
+        end
+        flushWriteQueue()
+    end
 end)
