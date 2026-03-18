@@ -156,6 +156,9 @@ Config['ZONE_SHOP'] = {
 			Pos     = vector4(-11.54, -1083.38, 26.68,165.09),
 			
 		},
+		TestDriveSpawn = nil, -- nil = ใช้ ShopOutside, หรือกำหนด vector4 จุดทดลองรถที่อยู่ไกลออกไปได้
+		TestDriveReturn = nil, -- nil = ใช้ ShopEnterShop ตอนหมดเวลา/ลงรถ
+		TestDriveDurationSec = 15 -- เวลาทดลองขับของจุดนี้
 	},
 	--[[
 	{
@@ -176,6 +179,9 @@ Config['ZONE_SHOP'] = {
 		ShopOutside = {
 			Pos = vector4(454.0, -1020.0, 28.0, 90.0),
 		},
+		TestDriveSpawn = vector4(1518.0, 3775.0, 34.0, 215.0),
+		TestDriveReturn = vector4(441.0, -981.0, 30.0, 90.0),
+		TestDriveDurationSec = 120
 	}
 	]]
 }
