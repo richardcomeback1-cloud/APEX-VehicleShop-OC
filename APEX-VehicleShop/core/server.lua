@@ -58,6 +58,7 @@ local PLATE_CACHE_TTL_MS = tonumber((Config and Config.Security and Config.Secur
 local BUY_COOLDOWN_MS = tonumber((Config and Config.Security and Config.Security.BuyCooldownMs) or 1200) or 1200
 local OWNED_SAVE_COOLDOWN_MS = tonumber((Config and Config.Security and Config.Security.SaveOwnedCooldownMs) or 1500) or 1500
 local WEBHOOK_WORKER_TICK_MS = tonumber((Config and Config.Security and Config.Security.WebhookWorkerTickMs) or 250) or 250
+local WEBHOOK_IDLE_TICK_MS = tonumber((Config and Config.Security and Config.Security.WebhookIdleTickMs) or math.max(1000, WEBHOOK_WORKER_TICK_MS * 4)) or math.max(1000, WEBHOOK_WORKER_TICK_MS * 4)
 local WEBHOOK_RETRY_BASE_MS = tonumber((Config and Config.Security and Config.Security.WebhookRetryBaseMs) or 2000) or 2000
 local WEBHOOK_RETRY_MAX_MS = tonumber((Config and Config.Security and Config.Security.WebhookRetryMaxMs) or 60000) or 60000
 local WEBHOOK_QUEUE_WARN_SIZE = tonumber((Config and Config.Security and Config.Security.WebhookQueueWarnSize) or 200) or 200
@@ -219,6 +220,7 @@ function VehicleShopModules.UI.buildPurchaseEmbed(data)
 end
 
 local vehicleConfigIndex = nil
+local shopPointIndex = nil
 local upsertAttemptIndex = 1
 
 local Modules = VehicleShopModules or {}
@@ -228,6 +230,7 @@ local JobsModule = Modules.Jobs or {}
 local UiModule = Modules.UI or {}
 
 local sendPurchaseWebhook
+local getPlayerPedCached
 
 local function compactPlate(plate)
     local trimmed = tostring(plate or ''):gsub('^%s*(.-)%s*$', '%1'):upper()
@@ -253,6 +256,23 @@ local function collectShopPoints(shop)
     return points
 end
 
+local function buildShopPointIndex()
+    if shopPointIndex then return shopPointIndex end
+
+    shopPointIndex = {}
+    for shopIndex, shop in pairs(Config['ZONE_SHOP'] or {}) do
+        local points = collectShopPoints(shop)
+        if #points > 0 then
+            shopPointIndex[#shopPointIndex + 1] = {
+                shopIndex = shopIndex,
+                points = points
+            }
+        end
+    end
+
+    return shopPointIndex
+end
+
 local function sqrDistance(a, b)
     local dx = a.x - b.x
     local dy = a.y - b.y
@@ -261,7 +281,7 @@ local function sqrDistance(a, b)
 end
 
 local function findShopInRange(src, maxDistance)
-    local ped = GetPlayerPed(src)
+    local ped = getPlayerPedCached(src)
     if not ped or ped == 0 then return nil end
 
     local coords = GetEntityCoords(ped)
@@ -271,14 +291,16 @@ local function findShopInRange(src, maxDistance)
     local maxDistSqr = allowedDistance * allowedDistance
     local nearestShopIndex = nil
     local nearestDistanceSqr = nil
+    local shops = buildShopPointIndex()
 
-    for shopIndex, shop in pairs(Config['ZONE_SHOP'] or {}) do
-        local points = collectShopPoints(shop)
-        for i = 1, #points do
-            local distSqr = sqrDistance(coords, points[i])
+    for i = 1, #shops do
+        local shop = shops[i]
+        local points = shop.points
+        for pointIndex = 1, #points do
+            local distSqr = sqrDistance(coords, points[pointIndex])
             if distSqr <= maxDistSqr and (not nearestDistanceSqr or distSqr < nearestDistanceSqr) then
                 nearestDistanceSqr = distSqr
-                nearestShopIndex = shopIndex
+                nearestShopIndex = shop.shopIndex
             end
         end
     end
@@ -401,7 +423,7 @@ local function invalidatePlayerCache(src)
     Runtime.PLAYER_PEDS[src] = nil
 end
 
-local function getPlayerPedCached(src)
+getPlayerPedCached = function(src)
     local now = GetGameTimer()
     local cached = Runtime.PLAYER_PEDS[src]
     if cached and cached.expiresAt > now and cached.value and cached.value ~= 0 then
@@ -424,37 +446,39 @@ local function validateSource(src)
 end
 
 local function validateEventContext(src, opts)
-    if not validateSource(src) then return false end
+    if not validateSource(src) then return false, nil end
 
     local state = getPlayerState(src)
+    local matchedShopIndex = nil
 
     if opts and opts.rateKey and opts.rateMs then
         if isOnCooldown(state, opts.rateKey, opts.rateMs) then
-            return false
+            return false, nil
         end
     end
 
     if opts and opts.requireShopDistance then
-        if not findShopInRange(src, tonumber(opts.requireShopDistance)) then
-            return false
+        matchedShopIndex = findShopInRange(src, tonumber(opts.requireShopDistance))
+        if not matchedShopIndex then
+            return false, nil
         end
     end
 
     if opts and opts.requirePlayer then
         local xPlayer = getPlayerCached(src)
         if not xPlayer then
-            return false
+            return false, matchedShopIndex
         end
 
         if opts.requireJob then
             local job = xPlayer.job and xPlayer.job.name or ''
             if job ~= opts.requireJob then
-                return false
+                return false, matchedShopIndex
             end
         end
     end
 
-    return true
+    return true, matchedShopIndex
 end
 
 local function getPlateOwnerCached(compact)
@@ -758,12 +782,13 @@ local function cbIsPlateTaken(source, cb, plate)
 end
 
 local function cbBuyVehicle(source, cb, model, _price, payment)
-    if not validateEventContext(source, {
+    local isValid, shopIndex = validateEventContext(source, {
         rateKey = 'buy_callback',
         rateMs = BUY_COOLDOWN_MS,
         requirePlayer = true,
         requireShopDistance = SHOP_INTERACTION_MAX_DISTANCE
-    }) then
+    })
+    if not isValid then
         cb(false)
         return
     end
@@ -794,7 +819,7 @@ local function cbBuyVehicle(source, cb, model, _price, payment)
 
     purchaseTickets[source] = {
         model = tostring(cfg.model),
-        shopIndex = findShopInRange(source, SHOP_INTERACTION_MAX_DISTANCE),
+        shopIndex = shopIndex,
         expiresAt = GetGameTimer() + PURCHASE_TICKET_TTL_MS
     }
 
@@ -802,12 +827,13 @@ local function cbBuyVehicle(source, cb, model, _price, payment)
 end
 
 local function saveOwnedVehicle(src, vehicleProps, purchaseModel)
-    if not validateEventContext(src, {
+    local isValid, currentShopIndex = validateEventContext(src, {
         rateKey = 'set_vehicle_owned',
         rateMs = OWNED_SAVE_COOLDOWN_MS,
         requirePlayer = true,
         requireShopDistance = SHOP_SAVE_MAX_DISTANCE
-    }) then
+    })
+    if not isValid then
         return false
     end
 
@@ -844,7 +870,7 @@ local function saveOwnedVehicle(src, vehicleProps, purchaseModel)
         if not cfg then break end
 
         local ticketShopIndex = tonumber(ticket.shopIndex)
-        if ticketShopIndex and findShopInRange(src, SHOP_SAVE_MAX_DISTANCE) ~= ticketShopIndex then
+        if ticketShopIndex and currentShopIndex ~= ticketShopIndex then
             break
         end
 
@@ -999,13 +1025,20 @@ local function nextRetryDelayMs(attempt, retryAfterMs)
 end
 
 local function processWebhookQueue()
-    if Runtime.WEBHOOK_QUEUE.inFlight then return end
+    if Runtime.WEBHOOK_QUEUE.inFlight then
+        return WEBHOOK_WORKER_TICK_MS
+    end
 
     local item = Runtime.WEBHOOK_QUEUE.data[Runtime.WEBHOOK_QUEUE.head]
-    if not item then return end
+    if not item then
+        return WEBHOOK_IDLE_TICK_MS
+    end
 
     local now = GetGameTimer()
-    if now < (tonumber(item.nextAttemptAt) or 0) then return end
+    local nextAttemptAt = tonumber(item.nextAttemptAt) or 0
+    if now < nextAttemptAt then
+        return math.max(50, math.min(nextAttemptAt - now, WEBHOOK_IDLE_TICK_MS))
+    end
 
     Runtime.WEBHOOK_QUEUE.inFlight = true
 
@@ -1042,6 +1075,8 @@ local function processWebhookQueue()
 
         Runtime.WEBHOOK_QUEUE.inFlight = false
     end, 'POST', json.encode(item.body), { ['Content-Type'] = 'application/json' })
+
+    return WEBHOOK_WORKER_TICK_MS
 end
 
 local function loadPersistedWebhookQueue()
@@ -1159,8 +1194,8 @@ CreateThread(function()
         for i = 1, #Runtime.TASK_SCHEDULER do
             local task = Runtime.TASK_SCHEDULER[i]
             if now >= (task.runAt or 0) then
-                task.runAt = now + task.interval
-                task.fn()
+                local nextInterval = task.fn()
+                task.runAt = now + (tonumber(nextInterval) or task.interval)
             end
             local remaining = (task.runAt or now) - now
             if remaining > 0 and remaining < sleep then
