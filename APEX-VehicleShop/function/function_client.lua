@@ -242,12 +242,17 @@ function GetCategory(vehiclesByCategory, availableCategories)
 		for i = 1, #vehicles do
 			local vehicle = vehicles[i]
 			local allowed = false
+			local canBuy = true
+			local requiredGrade = tonumber(vehicle.grade) or 0
 			if category == 'ambulance' then
-				allowed = job == 'ambulance' and grade >= (tonumber(vehicle.grade) or 0)
+				allowed = job == 'ambulance'
+				canBuy = grade >= requiredGrade
 			elseif category == 'police' then
-				allowed = job == 'police' and grade >= (tonumber(vehicle.grade) or 0)
+				allowed = job == 'police'
+				canBuy = grade >= requiredGrade
 			elseif category == 'council' then
-				allowed = job == 'council' and grade >= (tonumber(vehicle.grade) or 0)
+				allowed = job == 'council'
+				canBuy = grade >= requiredGrade
 			elseif category == 'mcclub' then
 				allowed = hasMc
 			elseif category == 'gang' then
@@ -258,7 +263,13 @@ function GetCategory(vehiclesByCategory, availableCategories)
 
 			if allowed then
 				data2[category] = data2[category] or {}
-				table.insert(data2[category], vehicle)
+				local vehicleEntry = {}
+				for key, value in pairs(vehicle) do
+					vehicleEntry[key] = value
+				end
+				vehicleEntry.requiredGrade = requiredGrade
+				vehicleEntry.canBuy = canBuy
+				table.insert(data2[category], vehicleEntry)
 			end
 		end
 	end

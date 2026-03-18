@@ -118,7 +118,7 @@ function VehicleShopModules.Jobs.isRestricted(category)
     return restrictedJobs[tostring(category)] == true
 end
 
-function VehicleShopModules.Jobs.canAccessVehicle(xPlayer, cfg)
+function VehicleShopModules.Jobs.canViewVehicle(xPlayer, cfg)
     if not cfg then
         return false
     end
@@ -132,11 +132,15 @@ function VehicleShopModules.Jobs.canAccessVehicle(xPlayer, cfg)
         return false
     end
 
-    if xPlayer.job.name ~= category then
+    return xPlayer.job.name == category
+end
+
+function VehicleShopModules.Jobs.canAccessVehicle(xPlayer, cfg)
+    if not VehicleShopModules.Jobs.canViewVehicle(xPlayer, cfg) then
         return false
     end
 
-    local grade = tonumber(cfg.grade or 0) or 0
+    local grade = tonumber(cfg and cfg.grade or 0) or 0
     return (xPlayer.job.grade or 0) >= grade
 end
 
@@ -1371,7 +1375,7 @@ AddEventHandler(Val .. ':Vehicle:Test', function(carname)
         return
     end
 
-    if JobsModule.canAccessVehicle and (not JobsModule.canAccessVehicle(xPlayer, cfg)) then
+    if JobsModule.canViewVehicle and (not JobsModule.canViewVehicle(xPlayer, cfg)) then
         return
     end
 
