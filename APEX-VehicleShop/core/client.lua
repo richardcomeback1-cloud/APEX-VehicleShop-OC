@@ -237,19 +237,6 @@ CreateThread(function()
     for _, v in pairs(Config['Category']) do
         ValDev.Categories[#ValDev.Categories + 1] = { name = v.index, label = v.label }
     end
-
-    for _, veh in pairs(Config['vehicles']) do
-        ValDev.Vehicles[#ValDev.Vehicles + 1] = {
-            name = veh.name,
-            model = veh.model,
-            price = veh.price,
-            category = veh.category,
-            kg = veh.kg,
-            grade = veh.grade,
-            typecar = veh.typecar,
-            class = GetClassNameCar(veh.model)
-        }
-    end
 end)
 
 CreateThread(function()
@@ -260,6 +247,7 @@ CreateThread(function()
             zoneCache[#zoneCache + 1] = {
                 index = k,
                 shop = v.shop,
+                config = v,
                 enter = v.ShopEnterShop,
                 enterPos = vector3(enterPos.x + 0.0, enterPos.y + 0.0, enterPos.z + 0.0)
             }
@@ -275,11 +263,13 @@ CreateThread(function()
 
             for i = 1, #zoneCache do
                 local zone = zoneCache[i]
-                local distSqr = sqrDistance(coords, zone.enterPos)
-                if distSqr < nearestDistSqr then
-                    nearestDistSqr = distSqr
-                    nearestZone = zone
-                    nearestIndex = zone.index
+                if ShopVisibleForPlayer(zone.config) then
+                    local distSqr = sqrDistance(coords, zone.enterPos)
+                    if distSqr < nearestDistSqr then
+                        nearestDistSqr = distSqr
+                        nearestZone = zone
+                        nearestIndex = zone.index
+                    end
                 end
             end
 
@@ -339,21 +329,33 @@ function OpenShopMenu(shop, indexshop)
     SetEntityCoords(playerPed, config.ShopEnterShop.Pos.x, config.ShopEnterShop.Pos.y, config.ShopEnterShop.Pos.z)
 
     local vehiclesByCategory = {}
+    local availableCategories = {}
     for i = 1, #ValDev.Categories do
         vehiclesByCategory[ValDev.Categories[i].name] = {}
     end
 
-    for i = 1, #ValDev.Vehicles do
-        local vehicle = ValDev.Vehicles[i]
-        if IsModelInCdimage(GetHashKey(vehicle.model)) then
+    local shopVehicles = GetVehiclesForShop(config)
+    for _, veh in pairs(shopVehicles) do
+        if veh and veh.model and IsModelInCdimage(GetHashKey(veh.model)) then
+            local vehicle = {
+                name = veh.name,
+                model = veh.model,
+                price = veh.price,
+                category = veh.category,
+                kg = veh.kg,
+                grade = veh.grade,
+                typecar = veh.typecar,
+                class = GetClassNameCar(veh.model)
+            }
             local bucket = vehiclesByCategory[vehicle.category]
             if bucket then
                 bucket[#bucket + 1] = vehicle
+                availableCategories[vehicle.category] = true
             end
         end
     end
 
-    local category, vehiclebysell = GetCategory(vehiclesByCategory)
+    local category, vehiclebysell = GetCategory(vehiclesByCategory, availableCategories)
     sendNUIIfChanged({
         openshop = true,
         vehiclesdata = vehiclebysell,
@@ -442,11 +444,16 @@ AddEventHandler(Val .. ':TestCar:Client', function(car)
 
     local config = Config['ZONE_SHOP'][ValDev.indexshop]
     local playerPed = PlayerPedId()
+    local selected = config and GetVehicleFromShop(config, car) or Config['vehicles'][car]
+    if not config or not selected then
+        ValDev.testcarme = false
+        return
+    end
     ValDev.IsInShopMenu = false
 
     setHudShopState()
     DeleteShopInsideVehicles()
-    ESX.Game.SpawnVehicle(Config['vehicles'][car].model, config.ShopOutside.Pos, config.ShopOutside.Pos.w, function(vehicle)
+    ESX.Game.SpawnVehicle(selected.model, config.ShopOutside.Pos, config.ShopOutside.Pos.w, function(vehicle)
         TaskWarpPedIntoVehicle(playerPed, vehicle, -1)
         SetVehicleNumberPlateText(vehicle, 'PLAY')
         SetNuiFocus(false, false)
@@ -457,7 +464,7 @@ AddEventHandler(Val .. ':TestCar:Client', function(car)
 
     FreezeEntityPosition(playerPed, false)
     SetEntityVisible(playerPed, true)
-    SendNUIMessage({ testcar = true, time = 15, carname = Config['vehicles'][car].name })
+    SendNUIMessage({ testcar = true, time = 15, carname = selected.name })
     TestCarCheck()
 end)
 
@@ -489,7 +496,8 @@ exports('CheckTestCar', CheckTestCar)
 
 RegisterNUICallback('buycar', function(data)
     local playerPed = PlayerPedId()
-    local selected = Config['vehicles'][data.carname]
+    local shopConfig = Config['ZONE_SHOP'][ValDev.indexshop]
+    local selected = shopConfig and GetVehicleFromShop(shopConfig, data.carname) or Config['vehicles'][data.carname]
     if not selected then return end
 
     ESX.TriggerServerCallback(Val .. ':buyVehicle', function(hasEnoughMoney)

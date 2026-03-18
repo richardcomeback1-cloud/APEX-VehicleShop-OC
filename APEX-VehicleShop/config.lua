@@ -138,6 +138,10 @@ Config['ColorList'] = {
 Config['ZONE_SHOP'] = {
 	{
 		shop = 'car',
+		label = 'Premium Deluxe Motorsport',
+		visibleJobs = nil, -- nil = ทุก job เห็นจุดนี้, หรือใส่ {'police', 'ambulance'} เฉพาะ job ที่ต้องการ
+		vehicleSource = 'public', -- public = ใช้ Config['vehicles'], job = ใช้ Config['JobVehicles'], all = ใช้ทั้งสองชุด
+		vehicleList = nil, -- nil = ใช้รถทั้งหมดจาก source ที่เลือก, หรือใส่ {'bati', 'police3'} เพื่อกำหนดรถเฉพาะจุดนี้
 		ShopEnterShop = {
 			Pos = vector4(-56.7774,-1096.98, 26.422,1.0),
 			Size  = { x = 1.5, y = 1.5, z = 1.0 },
@@ -152,7 +156,28 @@ Config['ZONE_SHOP'] = {
 			Pos     = vector4(-11.54, -1083.38, 26.68,165.09),
 			
 		},
+	},
+	--[[
+	{
+		shop = 'car',
+		label = 'Police Garage Shop',
+		visibleJobs = {'police'},
+		vehicleSource = 'job',
+		vehicleList = {'police3', 'policeb'},
+		ShopEnterShop = {
+			Pos = vector4(441.0, -981.0, 30.0, 90.0),
+			Size  = { x = 1.5, y = 1.5, z = 1.0 },
+			colormarker = { r = 40, g = 120, b = 255, a = 100 },
+			Type  = 20
+		},
+		ShopInside = {
+			Pos = vector4(449.0, -986.0, 25.0, 180.0),
+		},
+		ShopOutside = {
+			Pos = vector4(454.0, -1020.0, 28.0, 90.0),
+		},
 	}
+	]]
 }
 
 Config['Category'] = {
@@ -212,6 +237,28 @@ Config['Category'] = {
 	-- },
 
 	
+Config['JobVehicles'] = {
+	-- ตัวอย่างรถร้านหน่วยงาน แยกออกจาก Config['vehicles'] สำหรับร้าน job โดยเฉพาะ
+	-- ["police3"] = {
+	-- 	name = "Police Cruiser",
+	-- 	model = "police3",
+	-- 	price = 0,
+	-- 	category = "police",
+	-- 	grade = 0,
+	-- 	kg = 0,
+	-- 	typecar = 'car'
+	-- },
+	-- ["ambulance"] = {
+	-- 	name = "Ambulance",
+	-- 	model = "ambulance",
+	-- 	price = 0,
+	-- 	category = "ambulance",
+	-- 	grade = 0,
+	-- 	kg = 0,
+	-- 	typecar = 'car'
+	-- },
+}
+
 Config['vehicles'] = {
 	["adm_porcaygt2"] = {
 		name = "Porsche Cayenne Turbo GT",
