@@ -155,6 +155,42 @@ local function getTestDriveDuration(shopConfig)
     return duration
 end
 
+
+local function preparePlayerForVehicleSpawn(playerPed, targetPos)
+    if not playerPed or not targetPos then
+        return false
+    end
+
+    local currentCoords = GetEntityCoords(playerPed)
+    local shouldFade = sqrDistance(currentCoords, vector3(targetPos.x + 0.0, targetPos.y + 0.0, targetPos.z + 0.0)) > (200.0 * 200.0)
+
+    if shouldFade then
+        DoScreenFadeOut(500)
+        local timeoutAt = GetGameTimer() + 2500
+        while not IsScreenFadedOut() and GetGameTimer() < timeoutAt do
+            Wait(50)
+        end
+    end
+
+    pcall(function() exports['Val_report']:PlayerBypassTPM() end)
+    RequestCollisionAtCoord(targetPos.x, targetPos.y, targetPos.z)
+    SetEntityCoords(playerPed, targetPos.x, targetPos.y, targetPos.z + 1.0)
+
+    local timeoutAt = GetGameTimer() + 2500
+    while not HasCollisionLoadedAroundEntity(playerPed) and GetGameTimer() < timeoutAt do
+        RequestCollisionAtCoord(targetPos.x, targetPos.y, targetPos.z)
+        Wait(50)
+    end
+
+    return shouldFade
+end
+
+local function finishVehicleSpawnTransition(shouldFade)
+    if shouldFade then
+        DoScreenFadeIn(600)
+    end
+end
+
 Citizen.CreateThread(function()
     while ESX == nil do
         TriggerEvent(Config['BaseServer']['clinet_shared_obj'], function(obj) ESX = obj end)
@@ -484,6 +520,7 @@ AddEventHandler(Val .. ':TestCar:Client', function(car)
 
     setHudShopState()
     DeleteShopInsideVehicles()
+    local didFade = preparePlayerForVehicleSpawn(playerPed, testDriveSpawn)
     ESX.Game.SpawnVehicle(selected.model, testDriveSpawn, testDriveSpawn.w, function(vehicle)
         TaskWarpPedIntoVehicle(playerPed, vehicle, -1)
         SetVehicleNumberPlateText(vehicle, 'PLAY')
@@ -491,6 +528,7 @@ AddEventHandler(Val .. ':TestCar:Client', function(car)
         SetNuiFocusKeepInput(false)
         ValDev.openfocus = false
         SendNUIMessage({ closeui = true })
+        finishVehicleSpawnTransition(didFade)
     end)
 
     FreezeEntityPosition(playerPed, false)
@@ -546,6 +584,7 @@ RegisterNUICallback('buycar', function(data)
         DeleteShopInsideVehicles()
 
         local config = Config['ZONE_SHOP'][ValDev.indexshop]
+        local didFade = preparePlayerForVehicleSpawn(playerPed, config.ShopOutside.Pos)
         ESX.Game.SpawnVehicle(selected.model, config.ShopOutside.Pos, config.ShopOutside.Pos.w, function(vehicle)
             TaskWarpPedIntoVehicle(playerPed, vehicle, -1)
             local newPlate = GeneratePlate()
@@ -576,6 +615,7 @@ RegisterNUICallback('buycar', function(data)
             SetNuiFocus(false, false)
             SetNuiFocusKeepInput(false)
             ValDev.openfocus = false
+            finishVehicleSpawnTransition(didFade)
 
             local job = selected.category
             local carLabel = selected.name or selected.model
