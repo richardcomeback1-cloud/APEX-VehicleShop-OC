@@ -26,6 +26,8 @@ let choosemodelcar = null;
 let choosepayment = null;
 let currentPrice = 0;
 let currentVehicleName = '';
+let currentCanBuy = true;
+let currentRequiredGrade = 0;
 let money = 0;
 let bank = 0;
 let colorlist = {};
@@ -119,6 +121,8 @@ function closeUI() {
     choosemodelcar = null;
     currentPrice = 0;
     currentVehicleName = '';
+    currentCanBuy = true;
+    currentRequiredGrade = 0;
     
     // Hide panels with class-based approach
     const bottomPanel = document.getElementById('bottom-panel');
@@ -200,6 +204,8 @@ function buildVehicleList(vehiclesdata, shop) {
                              data-price="${item.price}"
                              data-class="${item.class || ''}"
                              data-kg="${item.kg || 0}"
+                             data-can-buy="${item.canBuy === false ? 'false' : 'true'}"
+                             data-required-grade="${item.requiredGrade || 0}"
                              style="animation-delay: ${delay}ms"
                              onclick="Choosecar(this)">
                             <div class="vehicle-card-image">
@@ -220,7 +226,9 @@ function buildVehicleList(vehiclesdata, shop) {
                             model: item.model,
                             price: item.price,
                             kg: item.kg || 0,
-                            class: item.class || ''
+                            class: item.class || '',
+                            canBuy: item.canBuy !== false,
+                            requiredGrade: item.requiredGrade || 0
                         };
                     }
                     
@@ -235,7 +243,7 @@ function buildVehicleList(vehiclesdata, shop) {
         setTimeout(() => {
             const firstCard = document.querySelector(`[data-model="${firstCar.model}"]`);
             if (firstCard) {
-                selectVehicle(firstCar.name, firstCar.model, firstCar.price, firstCar.kg, firstCar.class);
+                selectVehicle(firstCar.name, firstCar.model, firstCar.price, firstCar.kg, firstCar.class, firstCar.canBuy, firstCar.requiredGrade);
                 firstCard.classList.add('active');
             }
         }, 100);
@@ -255,8 +263,10 @@ function Choosecar(element) {
     const price = parseInt(element.dataset.price);
     const kg = parseInt(element.dataset.kg) || 0;
     const classcar = element.dataset.class || '';
+    const canBuy = element.dataset.canBuy !== 'false';
+    const requiredGrade = parseInt(element.dataset.requiredGrade || '0', 10) || 0;
     
-    selectVehicle(name, model, price, kg, classcar);
+    selectVehicle(name, model, price, kg, classcar, canBuy, requiredGrade);
     
     // Update active state
     document.querySelectorAll('.vehicle-card').forEach(card => {
@@ -265,15 +275,39 @@ function Choosecar(element) {
     element.classList.add('active');
 }
 
-function selectVehicle(carname, model, pricecar, kg, classcar) {
+function updateBuyButtonState() {
+    const buyBtn = document.getElementById('buy-btn');
+    const buyBtnLabel = document.getElementById('buy-btn-label');
+    const statusMessage = document.getElementById('buy-status-message');
+
+    if (!buyBtn || !buyBtnLabel || !statusMessage) {
+        return;
+    }
+
+    if (currentCanBuy) {
+        buyBtn.classList.remove('locked');
+        buyBtnLabel.textContent = 'ซื้อยานพาหนะ';
+        statusMessage.textContent = '';
+        return;
+    }
+
+    buyBtn.classList.add('locked');
+    buyBtnLabel.textContent = 'ยศคุณไม่ถึง';
+    statusMessage.textContent = currentRequiredGrade > 0 ? `ยศขั้นต่ำที่ต้องการ: ${currentRequiredGrade}` : 'ยศคุณไม่ถึง';
+}
+
+function selectVehicle(carname, model, pricecar, kg, classcar, canBuy = true, requiredGrade = 0) {
     choosemodelcar = model;
     currentPrice = pricecar;
     currentVehicleName = carname;
+    currentCanBuy = canBuy;
+    currentRequiredGrade = requiredGrade;
     
     // Update info panel
     document.getElementById('vehicle-class').textContent = classcar || 'ยานพาหนะ';
     document.getElementById('vehicle-name').textContent = carname;
     document.getElementById('vehicle-price').textContent = Config.Currency + formatNumber(pricecar);
+    updateBuyButtonState();
     
     // Notify game to show vehicle
     $.post('https://' + RESOURCE_NAME + '/choosecar', JSON.stringify({
@@ -283,7 +317,7 @@ function selectVehicle(carname, model, pricecar, kg, classcar) {
 
 // Legacy function for compatibility
 function Information(carname, model, pricecar, kg, classcar) {
-    selectVehicle(carname, model, pricecar, kg, classcar);
+    selectVehicle(carname, model, pricecar, kg, classcar, true, 0);
 }
 
 // ============================================
@@ -548,7 +582,7 @@ function endTestDrive() {
 // BUY MODAL
 // ============================================
 function openBuyModal() {
-    if (!choosemodelcar) return;
+    if (!choosemodelcar || !currentCanBuy) return;
     
     const modal = document.getElementById('buy-modal');
     modal.style.display = 'block';
@@ -588,7 +622,7 @@ function selectPayment(method) {
 }
 
 function confirmPurchase() {
-    if (!choosepayment || !choosemodelcar) {
+    if (!choosepayment || !choosemodelcar || !currentCanBuy) {
         return;
     }
     

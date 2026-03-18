@@ -127,6 +127,70 @@ local function getCachedPedAndCoords()
     return playerPedCache, playerCoordsCache
 end
 
+
+local function getTestDriveSpawnPos(shopConfig)
+    local testDriveSpawn = shopConfig and shopConfig.TestDriveSpawn and shopConfig.TestDriveSpawn.Pos or shopConfig and shopConfig.TestDriveSpawn
+    if testDriveSpawn and testDriveSpawn.x and testDriveSpawn.y and testDriveSpawn.z then
+        return testDriveSpawn
+    end
+
+    return shopConfig and shopConfig.ShopOutside and shopConfig.ShopOutside.Pos or nil
+end
+
+local function getTestDriveReturnPos(shopConfig)
+    local testDriveReturn = shopConfig and shopConfig.TestDriveReturn and shopConfig.TestDriveReturn.Pos or shopConfig and shopConfig.TestDriveReturn
+    if testDriveReturn and testDriveReturn.x and testDriveReturn.y and testDriveReturn.z then
+        return testDriveReturn
+    end
+
+    return shopConfig and shopConfig.ShopEnterShop and shopConfig.ShopEnterShop.Pos or nil
+end
+
+local function getTestDriveDuration(shopConfig)
+    local duration = tonumber(shopConfig and shopConfig.TestDriveDurationSec) or 15
+    if duration < 1 then
+        duration = 15
+    end
+
+    return duration
+end
+
+
+local function preparePlayerForVehicleSpawn(playerPed, targetPos)
+    if not playerPed or not targetPos then
+        return false
+    end
+
+    local currentCoords = GetEntityCoords(playerPed)
+    local shouldFade = sqrDistance(currentCoords, vector3(targetPos.x + 0.0, targetPos.y + 0.0, targetPos.z + 0.0)) > (200.0 * 200.0)
+
+    if shouldFade then
+        DoScreenFadeOut(500)
+        local timeoutAt = GetGameTimer() + 2500
+        while not IsScreenFadedOut() and GetGameTimer() < timeoutAt do
+            Wait(50)
+        end
+    end
+
+    pcall(function() exports['Val_report']:PlayerBypassTPM() end)
+    RequestCollisionAtCoord(targetPos.x, targetPos.y, targetPos.z)
+    SetEntityCoords(playerPed, targetPos.x, targetPos.y, targetPos.z + 1.0)
+
+    local timeoutAt = GetGameTimer() + 2500
+    while not HasCollisionLoadedAroundEntity(playerPed) and GetGameTimer() < timeoutAt do
+        RequestCollisionAtCoord(targetPos.x, targetPos.y, targetPos.z)
+        Wait(50)
+    end
+
+    return shouldFade
+end
+
+local function finishVehicleSpawnTransition(shouldFade)
+    if shouldFade then
+        DoScreenFadeIn(600)
+    end
+end
+
 Citizen.CreateThread(function()
     while ESX == nil do
         TriggerEvent(Config['BaseServer']['clinet_shared_obj'], function(obj) ESX = obj end)
@@ -237,19 +301,6 @@ CreateThread(function()
     for _, v in pairs(Config['Category']) do
         ValDev.Categories[#ValDev.Categories + 1] = { name = v.index, label = v.label }
     end
-
-    for _, veh in pairs(Config['vehicles']) do
-        ValDev.Vehicles[#ValDev.Vehicles + 1] = {
-            name = veh.name,
-            model = veh.model,
-            price = veh.price,
-            category = veh.category,
-            kg = veh.kg,
-            grade = veh.grade,
-            typecar = veh.typecar,
-            class = GetClassNameCar(veh.model)
-        }
-    end
 end)
 
 CreateThread(function()
@@ -260,6 +311,7 @@ CreateThread(function()
             zoneCache[#zoneCache + 1] = {
                 index = k,
                 shop = v.shop,
+                config = v,
                 enter = v.ShopEnterShop,
                 enterPos = vector3(enterPos.x + 0.0, enterPos.y + 0.0, enterPos.z + 0.0)
             }
@@ -275,11 +327,13 @@ CreateThread(function()
 
             for i = 1, #zoneCache do
                 local zone = zoneCache[i]
-                local distSqr = sqrDistance(coords, zone.enterPos)
-                if distSqr < nearestDistSqr then
-                    nearestDistSqr = distSqr
-                    nearestZone = zone
-                    nearestIndex = zone.index
+                if ShopVisibleForPlayer(zone.config) then
+                    local distSqr = sqrDistance(coords, zone.enterPos)
+                    if distSqr < nearestDistSqr then
+                        nearestDistSqr = distSqr
+                        nearestZone = zone
+                        nearestIndex = zone.index
+                    end
                 end
             end
 
@@ -339,21 +393,33 @@ function OpenShopMenu(shop, indexshop)
     SetEntityCoords(playerPed, config.ShopEnterShop.Pos.x, config.ShopEnterShop.Pos.y, config.ShopEnterShop.Pos.z)
 
     local vehiclesByCategory = {}
+    local availableCategories = {}
     for i = 1, #ValDev.Categories do
         vehiclesByCategory[ValDev.Categories[i].name] = {}
     end
 
-    for i = 1, #ValDev.Vehicles do
-        local vehicle = ValDev.Vehicles[i]
-        if IsModelInCdimage(GetHashKey(vehicle.model)) then
+    local shopVehicles = GetVehiclesForShop(config)
+    for _, veh in pairs(shopVehicles) do
+        if veh and veh.model and IsModelInCdimage(GetHashKey(veh.model)) then
+            local vehicle = {
+                name = veh.name,
+                model = veh.model,
+                price = veh.price,
+                category = veh.category,
+                kg = veh.kg,
+                grade = veh.grade,
+                typecar = veh.typecar,
+                class = GetClassNameCar(veh.model)
+            }
             local bucket = vehiclesByCategory[vehicle.category]
             if bucket then
                 bucket[#bucket + 1] = vehicle
+                availableCategories[vehicle.category] = true
             end
         end
     end
 
-    local category, vehiclebysell = GetCategory(vehiclesByCategory)
+    local category, vehiclebysell = GetCategory(vehiclesByCategory, availableCategories)
     sendNUIIfChanged({
         openshop = true,
         vehiclesdata = vehiclebysell,
@@ -426,9 +492,10 @@ local function EndTestDriveSession()
     SendNUIMessage({ closetime = true })
 
     local config = Config['ZONE_SHOP'][ValDev.indexshop]
-    if config and config.ShopEnterShop and config.ShopEnterShop.Pos then
+    local returnPos = getTestDriveReturnPos(config)
+    if returnPos then
         pcall(function() exports['Val_report']:PlayerBypassTPM() end)
-        SetEntityCoords(playerPed, config.ShopEnterShop.Pos.x, config.ShopEnterShop.Pos.y, config.ShopEnterShop.Pos.z + 1.0)
+        SetEntityCoords(playerPed, returnPos.x, returnPos.y, returnPos.z + 1.0)
         Wait(500)
     end
 
@@ -442,22 +509,31 @@ AddEventHandler(Val .. ':TestCar:Client', function(car)
 
     local config = Config['ZONE_SHOP'][ValDev.indexshop]
     local playerPed = PlayerPedId()
+    local selected = config and GetVehicleFromShop(config, car) or Config['vehicles'][car]
+    local testDriveSpawn = getTestDriveSpawnPos(config)
+    local testDriveDuration = getTestDriveDuration(config)
+    if not config or not selected or not testDriveSpawn then
+        ValDev.testcarme = false
+        return
+    end
     ValDev.IsInShopMenu = false
 
     setHudShopState()
     DeleteShopInsideVehicles()
-    ESX.Game.SpawnVehicle(Config['vehicles'][car].model, config.ShopOutside.Pos, config.ShopOutside.Pos.w, function(vehicle)
+    local didFade = preparePlayerForVehicleSpawn(playerPed, testDriveSpawn)
+    ESX.Game.SpawnVehicle(selected.model, testDriveSpawn, testDriveSpawn.w, function(vehicle)
         TaskWarpPedIntoVehicle(playerPed, vehicle, -1)
         SetVehicleNumberPlateText(vehicle, 'PLAY')
         SetNuiFocus(false, false)
         SetNuiFocusKeepInput(false)
         ValDev.openfocus = false
         SendNUIMessage({ closeui = true })
+        finishVehicleSpawnTransition(didFade)
     end)
 
     FreezeEntityPosition(playerPed, false)
     SetEntityVisible(playerPed, true)
-    SendNUIMessage({ testcar = true, time = 15, carname = Config['vehicles'][car].name })
+    SendNUIMessage({ testcar = true, time = testDriveDuration, carname = selected.name })
     TestCarCheck()
 end)
 
@@ -489,7 +565,8 @@ exports('CheckTestCar', CheckTestCar)
 
 RegisterNUICallback('buycar', function(data)
     local playerPed = PlayerPedId()
-    local selected = Config['vehicles'][data.carname]
+    local shopConfig = Config['ZONE_SHOP'][ValDev.indexshop]
+    local selected = shopConfig and GetVehicleFromShop(shopConfig, data.carname) or Config['vehicles'][data.carname]
     if not selected then return end
 
     ESX.TriggerServerCallback(Val .. ':buyVehicle', function(hasEnoughMoney)
@@ -507,6 +584,7 @@ RegisterNUICallback('buycar', function(data)
         DeleteShopInsideVehicles()
 
         local config = Config['ZONE_SHOP'][ValDev.indexshop]
+        local didFade = preparePlayerForVehicleSpawn(playerPed, config.ShopOutside.Pos)
         ESX.Game.SpawnVehicle(selected.model, config.ShopOutside.Pos, config.ShopOutside.Pos.w, function(vehicle)
             TaskWarpPedIntoVehicle(playerPed, vehicle, -1)
             local newPlate = GeneratePlate()
@@ -537,6 +615,7 @@ RegisterNUICallback('buycar', function(data)
             SetNuiFocus(false, false)
             SetNuiFocusKeepInput(false)
             ValDev.openfocus = false
+            finishVehicleSpawnTransition(didFade)
 
             local job = selected.category
             local carLabel = selected.name or selected.model

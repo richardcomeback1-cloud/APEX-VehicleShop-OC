@@ -748,6 +748,25 @@ body {
     transform: translateY(0);
 }
 
+.buy-btn.locked {
+    background: linear-gradient(135deg, #a72828, #6f1616);
+    border: 1px solid rgba(255, 80, 80, 0.45);
+}
+
+.buy-btn.locked:hover {
+    filter: brightness(1.0);
+    transform: none;
+}
+
+.buy-status-message {
+    min-height: 20px;
+    margin-top: 10px;
+    text-align: center;
+    font-size: 13px;
+    color: #ff8a8a;
+    font-family: ChaKraCustom, Anuphan, sans-serif;
+}
+
 /* Corner Accents */
 .corner-accent {
     position: absolute;

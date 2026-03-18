@@ -118,7 +118,7 @@ function VehicleShopModules.Jobs.isRestricted(category)
     return restrictedJobs[tostring(category)] == true
 end
 
-function VehicleShopModules.Jobs.canAccessVehicle(xPlayer, cfg)
+function VehicleShopModules.Jobs.canViewVehicle(xPlayer, cfg)
     if not cfg then
         return false
     end
@@ -132,11 +132,15 @@ function VehicleShopModules.Jobs.canAccessVehicle(xPlayer, cfg)
         return false
     end
 
-    if xPlayer.job.name ~= category then
+    return xPlayer.job.name == category
+end
+
+function VehicleShopModules.Jobs.canAccessVehicle(xPlayer, cfg)
+    if not VehicleShopModules.Jobs.canViewVehicle(xPlayer, cfg) then
         return false
     end
 
-    local grade = tonumber(cfg.grade or 0) or 0
+    local grade = tonumber(cfg and cfg.grade or 0) or 0
     return (xPlayer.job.grade or 0) >= grade
 end
 
@@ -312,16 +316,25 @@ local function findShopInRange(src, maxDistance)
     return nearestShopIndex
 end
 
+local function appendVehicleConfigIndex(target, source)
+    if type(source) ~= 'table' then
+        return
+    end
+
+    for key, cfg in pairs(source) do
+        target[tostring(key)] = cfg
+        if cfg and cfg.model then
+            target[tostring(cfg.model)] = cfg
+        end
+    end
+end
+
 local function buildVehicleConfigIndex()
     if vehicleConfigIndex then return vehicleConfigIndex end
 
     vehicleConfigIndex = {}
-    for key, cfg in pairs(Config['vehicles'] or {}) do
-        vehicleConfigIndex[tostring(key)] = cfg
-        if cfg and cfg.model then
-            vehicleConfigIndex[tostring(cfg.model)] = cfg
-        end
-    end
+    appendVehicleConfigIndex(vehicleConfigIndex, Config['vehicles'])
+    appendVehicleConfigIndex(vehicleConfigIndex, Config['JobVehicles'])
 
     return vehicleConfigIndex
 end
@@ -330,6 +343,100 @@ local function vehCfg(model)
     return buildVehicleConfigIndex()[tostring(model)]
 end
 
+
+local function normalizeJobName(jobName)
+    if jobName == nil then
+        return ''
+    end
+
+    return tostring(jobName)
+end
+
+local function shopAllowsJob(shopConfig, xPlayer)
+    if type(shopConfig) ~= 'table' then
+        return false
+    end
+
+    local visibleJobs = shopConfig.visibleJobs
+    if visibleJobs == nil then
+        return true
+    end
+
+    local playerJob = normalizeJobName(xPlayer and xPlayer.job and xPlayer.job.name)
+    if playerJob == '' then
+        return false
+    end
+
+    if type(visibleJobs) == 'string' then
+        return playerJob == normalizeJobName(visibleJobs)
+    end
+
+    if type(visibleJobs) == 'table' then
+        for i = 1, #visibleJobs do
+            if playerJob == normalizeJobName(visibleJobs[i]) then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+local function getShopVehiclePool(shopConfig)
+    local sourceType = tostring(shopConfig and shopConfig.vehicleSource or 'public')
+    local pool = {}
+
+    local function append(source)
+        if type(source) ~= 'table' then
+            return
+        end
+
+        for key, cfg in pairs(source) do
+            pool[tostring(key)] = cfg
+            if cfg and cfg.model then
+                pool[tostring(cfg.model)] = cfg
+            end
+        end
+    end
+
+    if sourceType == 'job' then
+        append(Config['JobVehicles'])
+    elseif sourceType == 'all' then
+        append(Config['vehicles'])
+        append(Config['JobVehicles'])
+    else
+        append(Config['vehicles'])
+    end
+
+    return pool
+end
+
+local function shopHasVehicle(shopConfig, model)
+    if type(shopConfig) ~= 'table' then
+        return false
+    end
+
+    local vehiclePool = getShopVehiclePool(shopConfig)
+    local configuredList = shopConfig.vehicleList
+    if configuredList == nil then
+        return vehiclePool[tostring(model or '')] ~= nil
+    end
+
+    local modelName = tostring(model or '')
+    if modelName == '' or type(configuredList) ~= 'table' then
+        return false
+    end
+
+    for i = 1, #configuredList do
+        local vehicleKey = tostring(configuredList[i])
+        local cfg = vehiclePool[vehicleKey]
+        if cfg and tostring(cfg.model or vehicleKey) == modelName then
+            return true
+        end
+    end
+
+    return false
+end
 local function lockAcquire(key)
     if Runtime.LOCK_SYSTEM[key] then return false end
     Runtime.LOCK_SYSTEM[key] = true
@@ -835,6 +942,12 @@ local function cbBuyVehicle(source, cb, model, _price, payment)
     local cfg = vehCfg(model)
     if not cfg or not cfg.model then cb(false) return end
 
+    local shopConfig = Config['ZONE_SHOP'] and Config['ZONE_SHOP'][shopIndex]
+    if not shopAllowsJob(shopConfig, xPlayer) or not shopHasVehicle(shopConfig, cfg.model) then
+        cb(false)
+        return
+    end
+
     if JobsModule.canAccessVehicle and (not JobsModule.canAccessVehicle(xPlayer, cfg)) then
         cb(false)
         return
@@ -1256,7 +1369,13 @@ AddEventHandler(Val .. ':Vehicle:Test', function(carname)
     if not cfg then return end
 
     local xPlayer = getPlayerCached(src)
-    if JobsModule.canAccessVehicle and (not JobsModule.canAccessVehicle(xPlayer, cfg)) then
+    local shopIndex = findShopInRange(src, SHOP_INTERACTION_MAX_DISTANCE)
+    local shopConfig = Config['ZONE_SHOP'] and Config['ZONE_SHOP'][shopIndex]
+    if not shopAllowsJob(shopConfig, xPlayer) or not shopHasVehicle(shopConfig, cfg.model) then
+        return
+    end
+
+    if JobsModule.canViewVehicle and (not JobsModule.canViewVehicle(xPlayer, cfg)) then
         return
     end
 
